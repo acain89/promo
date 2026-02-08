@@ -8,7 +8,7 @@ import { ensureActiveContestNow, getOrInitAmoeState } from "./lib/time.js";
 
 import healthRoutes from "./routes/health.js";
 import stripeWebhookRoutes from "./routes/stripeWebhook.js";
-import authRoutes from "./routes/auth.js";
+import requireUser from "./middleware/auth.js";
 import publicRoutes from "./routes/public.js";
 import myEntryRoutes from "./routes/myEntry.js";
 import checkoutRoutes from "./routes/checkout.js";
@@ -51,13 +51,10 @@ initFirestore();
 app.use(healthRoutes);
 
 // Stripe webhook MUST be mounted before express.json()
-app.use(stripeWebhookRoutes);
+app.use("/api/stripe/webhook", stripeWebhookRoutes());
 
 // JSON for everything else
 app.use(express.json());
-
-// Auth
-app.use(authRoutes);
 
 // Public
 app.use(publicRoutes);
