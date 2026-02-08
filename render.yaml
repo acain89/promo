@@ -14,15 +14,21 @@ services:
       - key: PORT
         value: 3001
 
-      # Required (set these in Render after deploy or as Blueprint env overrides)
-      - key: FRONTEND_URL
-        value: https://REPLACE_WITH_FRONTEND_URL
+      # Session (auto-generated secure secret)
+      - key: SESSION_SECRET
+        generateValue: true
 
+      # Frontend URL (for CORS)
+      - key: FRONTEND_URL
+        value: https://p3d4-p19u.onrender.com
+
+      # Stripe
       - key: STRIPE_SECRET_KEY
         value: REPLACE_ME
       - key: STRIPE_WEBHOOK_SECRET
         value: REPLACE_ME
 
+      # Firebase / Firestore
       - key: FB_PROJECT_ID
         value: REPLACE_ME
       - key: FB_CLIENT_EMAIL
@@ -36,7 +42,6 @@ services:
       - key: ADMIN_TOKEN_SECRET
         value: iwanttobedonewiththissitesobadandiwantittomakealotofmoney
 
-
   # =========================
   # FRONTEND (Static Site)
   # =========================
@@ -49,4 +54,4 @@ services:
     autoDeploy: true
     envVars:
       - key: VITE_API_BASE
-        value: https://REPLACE_WITH_BACKEND_URL
+        value: https://p3d4.onrender.com
