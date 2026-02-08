@@ -1,0 +1,52 @@
+services:
+  # =========================
+  # BACKEND (Node Web Service)
+  # =========================
+  - type: web
+    name: pick3-backend
+    env: node
+    rootDir: backend
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 3001
+
+      # Required (set these in Render after deploy or as Blueprint env overrides)
+      - key: FRONTEND_URL
+        value: https://REPLACE_WITH_FRONTEND_URL
+
+      - key: STRIPE_SECRET_KEY
+        value: REPLACE_ME
+      - key: STRIPE_WEBHOOK_SECRET
+        value: REPLACE_ME
+
+      - key: FB_PROJECT_ID
+        value: REPLACE_ME
+      - key: FB_CLIENT_EMAIL
+        value: REPLACE_ME
+      - key: FB_PRIVATE_KEY
+        value: REPLACE_ME
+
+      # Admin auth (token-based)
+      - key: ADMIN_CODE
+        value: "893889"
+      - key: ADMIN_TOKEN_SECRET
+        value: iwanttobedonewiththissitesobadandiwantittomakealotofmoney
+
+
+  # =========================
+  # FRONTEND (Static Site)
+  # =========================
+  - type: static
+    name: pick3-frontend
+    rootDir: .
+    plan: free
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    autoDeploy: true
+    envVars:
+      - key: VITE_API_BASE
+        value: https://REPLACE_WITH_BACKEND_URL

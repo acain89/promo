@@ -1,0 +1,553 @@
+/* =========================================================
+   GLOBAL THEME — Minimal / Editorial / Professional
+========================================================= */
+
+:root{
+  --bg-main:#0f1622;
+  --bg-panel:#141d2f;
+  --bg-soft:#1b2540;
+
+  --border-subtle:rgba(140,160,200,0.14);
+  --border-strong:rgba(140,160,200,0.28);
+
+  --text-main:#e7ebf3;
+  --text-muted:rgba(231,235,243,0.62);
+  --text-faint:rgba(231,235,243,0.42);
+
+  --accent:#7aa2ff;
+  --accent-soft:rgba(122,162,255,0.22);
+  --danger:#c94b4b;
+
+  --radius:14px;
+  --radius-sm:10px;
+  --shadow-soft:0 14px 40px rgba(0,0,0,0.45);
+
+  /* =======================================================
+     UNIFIED PANEL SIZE (matches Past Winners feel)
+     - Every panel: fixed "mobile screen" size
+     - Only internal sections scroll when needed
+  ======================================================= */
+  --panelW: min(94vw, 520px);
+  --panelH: min(92vh, 760px);
+
+  /* labels */
+  --label-bright: #cfe0ff; /* default */
+  --label-landing: #7aa2ff;
+  --label-join: #7affc2;
+  --label-profile: #c6a7ff;
+  --label-reveal: #ffd37a;
+  --label-winners: #9ad7ff;
+  --label-terms: #e7ebf3;
+}
+
+/* =========================================================
+   RESET / BASE
+========================================================= */
+
+*{ box-sizing:border-box; }
+
+html,body,#root{ height:100%; }
+
+body{
+  margin:0;
+  background:
+    radial-gradient(900px 420px at 50% -8%, #1b2947 0%, transparent 60%),
+    var(--bg-main);
+  color:var(--text-main);
+  font-family:system-ui,-apple-system,BlinkMacSystemFont,
+    "Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  line-height:1.55;
+  min-height:100svh;
+}
+
+a{
+  color:var(--text-muted);
+  text-decoration:none;
+}
+a:hover{ color:var(--accent); }
+
+:focus-visible{
+  outline:none;
+  box-shadow:0 0 0 3px var(--accent-soft);
+}
+
+/* =========================================================
+   APP ROOT CENTERING (fixes “everything stuck left”)
+   - Do NOT center every <main> (nested mains cause drift)
+========================================================= */
+
+#root{
+  min-height:100svh;
+  display:grid;
+  place-items:center;
+}
+
+/* Only used if you keep className="screen" in pages */
+.screen{
+  min-height:100svh;
+  width:100%;
+  display:grid;
+  place-items:center;
+  padding:24px 16px;
+}
+
+/* Any page wrapper you use (Landing/Admin/etc) */
+.pageCenter,
+.landingPage,
+.adminPage{
+  min-height:100svh;
+  width:100%;
+  display:grid;
+  place-items:center;
+  padding:24px 16px;
+}
+
+/* =========================================================
+   UNIFIED PANEL SHELL
+========================================================= */
+
+section{
+  width:100%;
+}
+
+/* base panel */
+.panel{
+  width:var(--panelW);
+  height:var(--panelH);
+  max-width:var(--panelW);
+  max-height:var(--panelH);
+
+  display:flex;
+  flex-direction:column;
+
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0)),
+    var(--bg-panel);
+  border:1px solid var(--border-subtle);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow-soft);
+
+  overflow:hidden; /* key: panel never scrolls */
+  text-align:center;
+}
+
+/* inner padding container */
+.screenPad{
+  padding:24px 22px;
+  height:100%;
+  display:flex;
+  flex-direction:column;
+}
+
+/* header / body / footer slots */
+.screenHeader{
+  flex:0 0 auto;
+  padding-bottom:14px;
+}
+
+.screenBody{
+  flex:1 1 auto;
+  overflow:hidden; /* default: NO SCROLL anywhere */
+  display:flex;
+  flex-direction:column;
+  justify-content:flex-start;
+  gap:12px;
+}
+
+.screenBody.scroll{
+  overflow:auto; /* Terms only */
+  padding-right:6px; /* space for scrollbar */
+}
+
+.screenFooter{
+  flex:0 0 auto;
+  padding-top:14px;
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  align-items:center;
+}
+
+/* =========================================================
+   PANEL LABELS (bold + bright + obvious)
+========================================================= */
+
+.panelLabel{
+  font-size:0.78rem;
+  letter-spacing:0.22em;
+  text-transform:uppercase;
+  font-weight:800;
+  color:var(--label-bright);
+}
+
+/* per panel accent */
+.panelLabel.landing{ color:var(--label-landing); }
+.panelLabel.join{ color:var(--label-join); }
+.panelLabel.profile{ color:var(--label-profile); }
+.panelLabel.reveal{ color:var(--label-reveal); }
+.panelLabel.winners{ color:var(--label-winners); }
+.panelLabel.terms{ color:var(--label-terms); }
+
+/* subtle header divider */
+.headerRule{
+  margin-top:10px;
+  height:1px;
+  background:rgba(255,255,255,0.06);
+  border:none;
+}
+
+/* =========================================================
+   TYPOGRAPHY UTIL
+========================================================= */
+
+.label{
+  font-size:0.7rem;
+  letter-spacing:0.18em;
+  text-transform:uppercase;
+  color:var(--text-faint);
+}
+
+.value{
+  font-weight:500;
+  letter-spacing:0.04em;
+}
+
+.fineprint{
+  font-size:0.75rem;
+  color:var(--text-faint);
+}
+
+.miniMuted{
+  font-size:0.78rem;
+  color:var(--text-muted);
+}
+
+/* =========================================================
+   BUTTONS
+========================================================= */
+
+.primary,
+.secondary{
+  width:100%;
+  padding:14px 16px;
+  font-size:0.85rem;
+  letter-spacing:0.18em;
+  text-transform:uppercase;
+  border-radius:var(--radius-sm);
+  cursor:pointer;
+  border:1px solid transparent;
+}
+
+.primary{
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0)),
+    var(--accent);
+  border:none;
+  color:#0b1220;
+}
+
+.primary:hover{ filter:brightness(1.04); }
+
+.primary:disabled{
+  opacity:0.55;
+  cursor:not-allowed;
+}
+
+.secondary{
+  background:transparent;
+  border:1px solid var(--border-strong);
+  color:var(--text-main);
+}
+
+.secondary:hover{
+  border-color:var(--accent);
+  box-shadow:0 0 0 3px var(--accent-soft);
+}
+
+.secondary:disabled{
+  opacity:0.6;
+  cursor:not-allowed;
+}
+
+/* Reveal button: distinct */
+.revealBtn{
+  border-color: rgba(255, 211, 122, 0.45);
+}
+.revealBtn:hover{
+  border-color: rgba(255, 211, 122, 0.85);
+  box-shadow: 0 0 0 3px rgba(255, 211, 122, 0.18);
+}
+.revealBtn:disabled{
+  opacity:0.35;
+}
+
+@keyframes softPulse {
+  0% { box-shadow: 0 0 0 0 rgba(255, 211, 122, 0.0); }
+  55%{ box-shadow: 0 0 0 10px rgba(255, 211, 122, 0.14); }
+  100%{ box-shadow: 0 0 0 0 rgba(255, 211, 122, 0.0); }
+}
+.revealPulse{
+  animation: softPulse 1.8s ease-in-out infinite;
+}
+
+/* =========================================================
+   FORMS
+========================================================= */
+
+.form{
+  width:100%;
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  margin-top:6px;
+}
+
+.fieldLabel{
+  display:block;
+  margin:12px 0 6px;
+  font-size:0.65rem;
+  letter-spacing:0.18em;
+  text-transform:uppercase;
+  color:var(--text-faint);
+  text-align:left;
+}
+
+.field{
+  width:100%;
+  padding:12px 14px;
+  background:var(--bg-soft);
+  border:1px solid var(--border-subtle);
+  border-radius:var(--radius-sm);
+  color:var(--text-main);
+  font-size:1rem;
+}
+
+.field::placeholder{
+  color:rgba(231,235,243,0.32);
+}
+
+/* =========================================================
+   ERRORS
+========================================================= */
+
+.error{
+  margin-top:4px;
+  font-size:0.8rem;
+  color:#ffb2b2;
+  text-align:center;
+}
+
+/* =========================================================
+   MODALS (How it works / notices)
+   - Centered
+   - Header readable + colored
+   - Close X centered
+========================================================= */
+
+.prevModal{
+  position:fixed;
+  inset:0;
+  display:grid;
+  place-items:center;
+  padding:24px 16px;
+  background:rgba(0,0,0,0.62);
+  backdrop-filter:blur(10px);
+  z-index:1000;
+}
+
+.prevCard{
+  width:min(94vw, 520px);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0)),
+    var(--bg-panel);
+  border:1px solid var(--border-strong);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow-soft);
+  overflow:hidden;
+}
+
+.prevHeader{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  padding:14px 16px;
+  border-bottom:1px solid var(--border-subtle);
+}
+
+.prevTitle{
+  font-size:0.7rem;
+  letter-spacing:0.18em;
+  text-transform:uppercase;
+  color:var(--accent);
+  font-weight:900;
+}
+
+.prevClose{
+  width:36px;
+  height:36px;
+  border-radius:12px;
+  border:1px solid var(--border-subtle);
+  background:transparent;
+  color:var(--text-main);
+  cursor:pointer;
+  display:grid;
+  place-items:center;
+  padding:0;
+  line-height:1;
+}
+
+.prevClose:hover{
+  border-color:var(--accent);
+  box-shadow:0 0 0 3px var(--accent-soft);
+}
+
+.prevBody{
+  padding:18px 16px 20px;
+  color:rgba(231,235,243,0.86);
+}
+
+/* =========================================================
+   DIGIT ENTRY (JOIN / PROFILE WHEELS) — responsive
+========================================================= */
+
+.digitRow{
+  display:flex;
+  gap: clamp(8px, 2.2vw, 12px);
+  justify-content:center;
+  margin: 6px 0 10px;
+}
+
+.digitBox{
+  width: clamp(46px, 15.5vw, 60px);
+  height: clamp(54px, 17.5vw, 68px);
+  text-align:center;
+
+  font-size: clamp(26px, 8.5vw, 34px);
+  line-height: 1;
+
+  background:var(--bg-soft);
+  border:1px solid var(--border-strong);
+  border-radius: 14px;
+  color:var(--text-main);
+
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+
+  /* mobile keyboard feel */
+  padding: 0;
+}
+
+.digitBox:disabled{ opacity:0.6; }
+
+
+/* =========================================================
+   WINNERS LIST (scroll only inside list)
+========================================================= */
+
+.scrollList{
+  overflow:auto;
+  max-height: 420px;
+  padding-right:6px;
+  display:grid;
+  gap:16px;
+}
+
+/* =========================================================
+   WINNER CARDS (Past Winners panel)
+========================================================= */
+
+.winnerCard{
+  padding:18px 16px;
+  border-radius:16px;
+  border:1px solid rgba(255,255,255,0.10);
+  background:rgba(255,255,255,0.02);
+  text-align:center;
+}
+
+.winnerUN{
+  font-size:1.05rem;
+  font-weight:800;
+  letter-spacing:0.04em;
+  margin-bottom:6px;
+}
+
+.winnerPrize{
+  font-size:1.2rem;
+  font-weight:900;
+  margin-bottom:10px;
+}
+
+.winnerGrid{
+  display:grid;
+  grid-template-columns:1fr 1fr 1fr;
+  gap:8px;
+  font-size:0.85rem;
+  margin-bottom:10px;
+}
+
+.winnerTS{
+  font-size:0.75rem;
+  opacity:0.6;
+  letter-spacing:0.06em;
+}
+
+/* =========================================================
+   ADMIN — DESKTOP ONLY / FULL SCREEN (CENTER + NO SCROLL)
+========================================================= */
+
+.admin, .adminLocked{
+  width:100%;
+  max-width:none;
+}
+
+.adminPage{
+  min-height:100svh;
+  width:100%;
+  display:grid;
+  place-items:center;
+  padding:24px 16px;
+}
+
+.adminCard{
+  width:min(1200px, 96vw);
+  max-height:92vh;
+  overflow:hidden;      /* page never scrolls */
+  margin:0 auto;        /* centered */
+  background:var(--bg-panel);
+  border:1px solid var(--border-subtle);
+  border-radius:var(--radius);
+  padding:18px;         /* slightly tighter */
+}
+
+/* =========================================================
+   TIMER EMPHASIS (Landing)
+========================================================= */
+
+.countdownTimer{
+  font-weight: 900;
+  font-size: clamp(30px, 4.6vw, 48px);
+  letter-spacing: 0.12em;
+  text-align:center;
+
+  color:#ff3b2f;
+  -webkit-text-stroke: 0.6px rgba(0,0,0,0.35);
+  text-shadow:
+    0 0 0 rgba(0,0,0,0),
+    0 0 10px rgba(255,60,60,0.35),
+    0 0 18px rgba(255,60,60,0.22);
+
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* =========================================================
+   DESKTOP SCALE
+========================================================= */
+
+@media (min-width:768px){
+  :root{
+    --panelH: min(88vh, 780px);
+  }
+}
