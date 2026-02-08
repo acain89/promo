@@ -1,100 +1,141 @@
 // src/lib/api.js
-const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
-const TOKEN_KEY = "admin_token_v1";
 
-/* =========================================================
-   ADMIN TOKEN (sessionStorage)
-========================================================= */
+// If you deploy frontend+backend separately on Render, set VITE_API_BASE to your backend URL.
+// Example: VITE_API_BASE=https://your-backend.onrender.com
+const API_BASE = String(import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
 
-function getAdminToken() {
-  try {
-    return sessionStorage.getItem(TOKEN_KEY) || "";
-  } catch {
-    return "";
-  }
-}
+let ADMIN_TOKEN = null;
 
 export function setAdminToken(token) {
+  ADMIN_TOKEN = String(token || "").trim() || null;
+}
+
+function buildUrl(path) {
+  const p = String(path || "");
+  if (!p) return API_BASE || "/";
+  if (p.startsWith("http://") || p.startsWith("https://")) return p;
+  if (!API_BASE) return p;
+  return `${API_BASE}${p.startsWith("/") ? "" : "/"}${p}`;
+}
+
+async function readJsonSafe(res) {
+  const txt = await res.text();
+  if (!txt) return null;
   try {
-    if (!token) sessionStorage.removeItem(TOKEN_KEY);
-    else sessionStorage.setItem(TOKEN_KEY, token);
-  } catch {}
+    return JSON.parse(txt);
+  } catch {
+    return { raw: txt };
+  }
 }
 
-/* =========================================================
-   CORE FETCH HELPERS (cookie-session)
-========================================================= */
-
-async function readJson(res) {
-  const j = await res.json().catch(() => ({}));
-  return j;
+function makeHeaders(extra = {}, includeAdminToken = true) {
+  const h = { ...extra };
+  if (includeAdminToken && ADMIN_TOKEN) {
+    h.Authorization = `Bearer ${ADMIN_TOKEN}`;
+  }
+  return h;
 }
 
-export async function apiGet(path) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    credentials: "include", // REQUIRED for cookie sessions
-  });
+async function request(method, path, body, opts = {}) {
+  const url = buildUrl(path);
 
-  const j = await readJson(res);
-  if (!res.ok) throw new Error(j.error || "Request failed");
-  return j;
-}
+  const includeAdminToken = opts.includeAdminToken !== false;
+  const headers = makeHeaders(opts.headers || {}, includeAdminToken);
 
-export async function apiPost(path, body, opts = {}) {
-  const headers = {
-    "Content-Type": "application/json",
-    ...(opts.headers || {}),
+  const init = {
+    method,
+    headers,
+    credentials: "include", // ✅ REQUIRED for session cookie auth
   };
 
-  // Admin endpoints still use Bearer token (separate from user cookie session)
-  if (path.startsWith("/api/admin/")) {
-    const token = getAdminToken();
-    if (token) headers.Authorization = `Bearer ${token}`;
+  if (body !== undefined) {
+    init.headers = {
+      "Content-Type": "application/json",
+      ...headers,
+    };
+    init.body = JSON.stringify(body);
   }
 
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: "POST",
-    headers,
-    credentials: "include", // REQUIRED for cookie sessions
-    body: JSON.stringify(body || {}),
-  });
+  let res;
+  try {
+    res = await fetch(url, init);
+  } catch (e) {
+    const err = new Error(e?.message || "Network error.");
+    err.status = 0;
+    throw err;
+  }
 
-  const j = await readJson(res);
-  if (!res.ok) throw new Error(j.error || "Request failed");
-  return j;
+  const data = await readJsonSafe(res);
+
+  if (!res.ok) {
+    const msg = (data && (data.error || data.message)) || `Request failed (${res.status})`;
+    const err = new Error(String(msg));
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
+
+  return data;
 }
 
 /* =========================================================
-   AUTH HELPERS (cookie-session)
-   backend routes:
-   POST /api/auth/signup
-   POST /api/auth/login
-   POST /api/auth/logout
-   GET  /api/me
-   POST /api/auth/forgot
-   POST /api/auth/reset
+   Public helpers
 ========================================================= */
 
-export function authSignup({ username, email, password }) {
-  return apiPost("/api/auth/signup", { username, email, password });
+export async function apiGet(path, opts) {
+  return request("GET", path, undefined, opts);
 }
 
-export function authLogin({ username, password }) {
-  return apiPost("/api/auth/login", { username, password });
+export async function apiPost(path, body, opts) {
+  return request("POST", path, body, opts);
 }
 
-export function authLogout() {
-  return apiPost("/api/auth/logout", {});
+/* =========================================================
+   Soft helpers (do not throw)
+========================================================= */
+
+export async function apiGetSoft(path, opts) {
+  try {
+    const data = await apiGet(path, opts);
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e };
+  }
 }
 
-export function authMe() {
+export async function apiPostSoft(path, body, opts) {
+  try {
+    const data = await apiPost(path, body, opts);
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e };
+  }
+}
+
+/* =========================================================
+   Auth helpers your pages already use
+========================================================= */
+
+export async function authMe() {
   return apiGet("/api/me");
 }
 
-export function authForgot({ email }) {
-  return apiPost("/api/auth/forgot", { email });
+export async function authSignup(payload) {
+  return apiPost("/api/auth/signup", payload, { includeAdminToken: false });
 }
 
-export function authReset({ token, newPassword }) {
-  return apiPost("/api/auth/reset", { token, newPassword });
+export async function authLogin(payload) {
+  return apiPost("/api/auth/login", payload, { includeAdminToken: false });
+}
+
+export async function authLogout() {
+  return apiPost("/api/auth/logout", {}, { includeAdminToken: false });
+}
+
+export async function authForgot(payload) {
+  return apiPost("/api/auth/forgot", payload, { includeAdminToken: false });
+}
+
+export async function authReset(payload) {
+  return apiPost("/api/auth/reset", payload, { includeAdminToken: false });
 }

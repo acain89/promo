@@ -37,7 +37,19 @@ function downloadJson(filename, obj) {
   } catch {}
 }
 
-function LoginModal({ open, onClose, onSubmit, err }) {
+// Best-effort extract of error details from thrown objects
+function errMsg(e, fallback = "Request failed.") {
+  const m =
+    e?.message ||
+    e?.error ||
+    e?.response?.data?.error ||
+    e?.response?.error ||
+    e?.data?.error ||
+    e?.toString?.();
+  return String(m || fallback);
+}
+
+function LoginModal({ open, onClose, onSubmit, err, busy }) {
   const [code, setCode] = useState("");
 
   useEffect(() => {
@@ -46,6 +58,8 @@ function LoginModal({ open, onClose, onSubmit, err }) {
   }, [open]);
 
   if (!open) return null;
+
+  const canSubmit = !!String(code || "").trim() && !busy;
 
   return (
     <div
@@ -60,7 +74,7 @@ function LoginModal({ open, onClose, onSubmit, err }) {
         backdropFilter: "blur(6px)",
       }}
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose?.();
+        if (e.target === e.currentTarget && !busy) onClose?.();
       }}
       role="dialog"
       aria-modal="true"
@@ -79,7 +93,7 @@ function LoginModal({ open, onClose, onSubmit, err }) {
       >
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
           <h3 style={{ margin: 0 }}>Admin Code</h3>
-          <button className="secondary" onClick={onClose} style={{ padding: "8px 10px" }}>
+          <button className="secondary" onClick={onClose} style={{ padding: "8px 10px" }} disabled={busy}>
             Close
           </button>
         </div>
@@ -95,27 +109,24 @@ function LoginModal({ open, onClose, onSubmit, err }) {
           value={code}
           onChange={(e) => setCode(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") onSubmit?.(code);
-            if (e.key === "Escape") onClose?.();
+            if (e.key === "Enter" && canSubmit) onSubmit?.(code);
+            if (e.key === "Escape" && !busy) onClose?.();
           }}
           placeholder="••••••"
           style={{ width: "100%", maxWidth: "100%", padding: "12px 12px" }}
+          disabled={busy}
         />
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
-          <button className="secondary" onClick={onClose}>
+          <button className="secondary" onClick={onClose} disabled={busy}>
             Cancel
           </button>
-          <button className="primary" onClick={() => onSubmit?.(code)} disabled={!String(code || "").trim()}>
-            Unlock
+          <button className="primary" onClick={() => onSubmit?.(code)} disabled={!canSubmit}>
+            {busy ? "Unlocking..." : "Unlock"}
           </button>
         </div>
 
-        {err ? (
-          <div style={{ marginTop: 10, color: "#ffb2b2", fontSize: 13 }}>
-            {err}
-          </div>
-        ) : null}
+        {err ? <div style={{ marginTop: 10, color: "#ffb2b2", fontSize: 13 }}>{err}</div> : null}
       </div>
     </div>
   );
@@ -125,6 +136,7 @@ export default function Admin() {
   const [unlocked, setUnlocked] = useState(false);
   const [status, setStatus] = useState("");
   const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
 
   const [state, setState] = useState(null);
 
@@ -161,7 +173,7 @@ export default function Admin() {
 
   async function adminLoginSubmit(code) {
     const attempt = String(code || "").trim();
-    if (!attempt) return;
+    if (!attempt || loginBusy) return;
 
     try {
       setLoginBusy(true);
@@ -169,24 +181,27 @@ export default function Admin() {
       setStatus("");
 
       const r = await apiPost("/api/admin/login", { code: attempt });
+      if (!r?.token) throw new Error("Login did not return a token.");
       setAdminToken(r.token);
+
       setUnlocked(true);
       setLoginOpen(false);
       setStatus("Admin unlocked.");
     } catch (e) {
-      setErr(e.message || "Login failed.");
+      setErr(errMsg(e, "Login failed."));
     } finally {
       setLoginBusy(false);
     }
   }
 
   async function refresh() {
+    if (!unlocked) return;
     try {
       setErr("");
       const s = await apiPost("/api/admin/state", {});
       setState(s);
     } catch (e) {
-      setErr(e.message || "Failed to load admin state.");
+      setErr(errMsg(e, "Failed to load admin state."));
     }
   }
 
@@ -196,199 +211,231 @@ export default function Admin() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unlocked]);
 
-  async function setContestMode(nextMode) {
+  async function withBusy(fn) {
+    if (busy) return;
     try {
-      setStatus("");
-      setErr("");
-      await apiPost("/api/admin/mode", { mode: nextMode });
-      setStatus(`Mode set to ${nextMode}.`);
-      await refresh();
-    } catch (e) {
-      setErr(e.message || "Failed to set mode.");
+      setBusy(true);
+      await fn();
+    } finally {
+      setBusy(false);
     }
+  }
+
+  async function setContestMode(nextMode) {
+    await withBusy(async () => {
+      try {
+        setStatus("");
+        setErr("");
+        await apiPost("/api/admin/mode", { mode: nextMode });
+        setStatus(`Mode set to ${nextMode}.`);
+        await refresh();
+      } catch (e) {
+        setErr(errMsg(e, "Failed to set mode."));
+      }
+    });
   }
 
   async function paidDoPreview() {
-    try {
-      setStatus("");
-      setErr("");
-      setPaidPreview(null);
-      setShowPaidPreviewDetails(false);
+    await withBusy(async () => {
+      try {
+        setStatus("");
+        setErr("");
+        setPaidPreview(null);
+        setShowPaidPreviewDetails(false);
 
-      const d = paidDigits();
-      if (paidTarget.length !== d) throw new Error(`Enter exactly ${d} digits for Paid target.`);
+        const d = paidDigits();
+        if (paidTarget.length !== d) throw new Error(`Enter exactly ${d} digits for Paid target.`);
 
-      const r = await apiPost("/api/admin/paid/preview", { targetNumber: paidTarget });
-      setPaidPreview(r);
-      setStatus("Paid preview ready (not posted).");
-    } catch (e) {
-      setErr(e.message || "Paid preview failed.");
-    }
+        const r = await apiPost("/api/admin/paid/preview", { targetNumber: paidTarget });
+        setPaidPreview(r);
+        setStatus("Paid preview ready (not posted).");
+      } catch (e) {
+        setErr(errMsg(e, "Paid preview failed."));
+      }
+    });
   }
 
   async function paidPostResults() {
-    try {
-      setStatus("");
-      setErr("");
+    await withBusy(async () => {
+      try {
+        setStatus("");
+        setErr("");
 
-      const d = paidDigits();
-      if (paidTarget.length !== d) throw new Error(`Enter exactly ${d} digits for Paid target.`);
+        const d = paidDigits();
+        if (paidTarget.length !== d) throw new Error(`Enter exactly ${d} digits for Paid target.`);
 
-      const confirmText =
-        `POST PAID RESULTS as ${paidTarget}?\n\n` +
-        `This action is IRREVERSIBLE.\n` +
-        `Winner: Closest DFT, then earliest timestamp.\n\n` +
-        `Proceed?`;
+        const confirmText =
+          `POST PAID RESULTS as ${paidTarget}?\n\n` +
+          `This action is IRREVERSIBLE.\n` +
+          `Winner: Closest DFT, then earliest timestamp.\n\n` +
+          `Proceed?`;
 
-      if (!window.confirm(confirmText)) return;
+        if (!window.confirm(confirmText)) return;
 
-      await apiPost("/api/admin/resolve", { targetNumber: paidTarget });
+        await apiPost("/api/admin/resolve", { targetNumber: paidTarget });
 
-      setStatus("Paid results posted.");
-      setPaidPreview(null);
-      setShowPaidPreviewDetails(false);
-      await refresh();
-    } catch (e) {
-      setErr(e.message || "Failed to post paid results.");
-    }
+        setStatus("Paid results posted.");
+        setPaidPreview(null);
+        setShowPaidPreviewDetails(false);
+        await refresh();
+      } catch (e) {
+        setErr(errMsg(e, "Failed to post paid results."));
+      }
+    });
   }
 
   async function paidActivateSunday() {
-    try {
-      setStatus("");
-      setErr("");
+    await withBusy(async () => {
+      try {
+        setStatus("");
+        setErr("");
 
-      const confirmText =
-        `ACTIVATE upcoming paid contest?\n\n` +
-        `This will make queued paid entries visible (entryCount + prize) for the active contest.\n` +
-        `Proceed?`;
+        const confirmText =
+          `ACTIVATE upcoming paid contest?\n\n` +
+          `This will make queued paid entries visible (entryCount + prize) for the active contest.\n` +
+          `Proceed?`;
 
-      if (!window.confirm(confirmText)) return;
+        if (!window.confirm(confirmText)) return;
 
-      await apiPost("/api/admin/paid/activate", {});
-      setStatus("Paid contest activated. Queued entries are now applied.");
-      await refresh();
-    } catch (e) {
-      setErr(e.message || "Failed to activate contest.");
-    }
+        await apiPost("/api/admin/paid/activate", {});
+        setStatus("Paid contest activated. Queued entries are now applied.");
+        await refresh();
+      } catch (e) {
+        setErr(errMsg(e, "Failed to activate contest."));
+      }
+    });
   }
 
   async function exportPaid() {
-    try {
-      setStatus("");
-      setErr("");
-      const r = await apiPost("/api/admin/export/paid", {});
-      downloadJson(`drawnfray_paid_export_${r?.payload?.contest?.id || "contest"}.json`, r.payload || r);
-      setStatus("Paid export downloaded.");
-    } catch (e) {
-      setErr(e.message || "Paid export failed.");
-    }
+    await withBusy(async () => {
+      try {
+        setStatus("");
+        setErr("");
+        const r = await apiPost("/api/admin/export/paid", {});
+        downloadJson(`drawnfray_paid_export_${r?.payload?.contest?.id || "contest"}.json`, r.payload || r);
+        setStatus("Paid export downloaded.");
+      } catch (e) {
+        setErr(errMsg(e, "Paid export failed."));
+      }
+    });
   }
 
   async function exportAmoe() {
-    try {
-      setStatus("");
-      setErr("");
-      const r = await apiPost("/api/admin/export/amoe", {});
-      downloadJson(`drawnfray_amoe_export_cycle_${r?.payload?.cycleId || "cycle"}.json`, r.payload || r);
-      setStatus("AMOE export downloaded.");
-    } catch (e) {
-      setErr(e.message || "AMOE export failed.");
-    }
+    await withBusy(async () => {
+      try {
+        setStatus("");
+        setErr("");
+        const r = await apiPost("/api/admin/export/amoe", {});
+        downloadJson(`drawnfray_amoe_export_cycle_${r?.payload?.cycleId || "cycle"}.json`, r.payload || r);
+        setStatus("AMOE export downloaded.");
+      } catch (e) {
+        setErr(errMsg(e, "AMOE export failed."));
+      }
+    });
   }
 
   async function amoeAdd() {
-    try {
-      setStatus("");
-      setErr("");
+    await withBusy(async () => {
+      try {
+        setStatus("");
+        setErr("");
 
-      const nm = String(amoeName || "").trim();
-      const em = String(amoeEmail || "").trim();
-      const ad = String(amoeAddress || "").trim();
+        const nm = String(amoeName || "").trim();
+        const em = String(amoeEmail || "").trim();
+        const ad = String(amoeAddress || "").trim();
 
-      if (nm.length < 2) throw new Error("AMOE name required.");
-      if (!em.includes("@")) throw new Error("AMOE email required.");
-      if (ad.length < 6) throw new Error("AMOE address required.");
-      if (amoeGuess.length !== 3) throw new Error("AMOE guess must be 3 digits.");
+        if (nm.length < 2) throw new Error("AMOE name required.");
+        if (!em.includes("@")) throw new Error("AMOE email required.");
+        if (ad.length < 6) throw new Error("AMOE address required.");
+        if (amoeGuess.length !== 3) throw new Error("AMOE guess must be 3 digits.");
 
-      await apiPost("/api/admin/amoe/add", { name: nm, email: em, address: ad, guess: amoeGuess });
+        await apiPost("/api/admin/amoe/add", { name: nm, email: em, address: ad, guess: amoeGuess });
 
-      setAmoeGuessRaw("");
-      setStatus("AMOE entry added.");
-      await refresh();
-    } catch (e) {
-      setErr(e.message || "Failed to add AMOE.");
-    }
+        setAmoeGuessRaw("");
+        setStatus("AMOE entry added.");
+        await refresh();
+      } catch (e) {
+        setErr(errMsg(e, "Failed to add AMOE."));
+      }
+    });
   }
 
   async function amoeDoPreview() {
-    try {
-      setStatus("");
-      setErr("");
-      setAmoePreview(null);
-      setShowAmoePreviewDetails(false);
+    await withBusy(async () => {
+      try {
+        setStatus("");
+        setErr("");
+        setAmoePreview(null);
+        setShowAmoePreviewDetails(false);
 
-      if (amoeTarget.length !== 3) throw new Error("Enter exactly 3 digits for AMOE target.");
+        if (amoeTarget.length !== 3) throw new Error("Enter exactly 3 digits for AMOE target.");
 
-      const r = await apiPost("/api/admin/amoe/preview", { targetNumber: amoeTarget });
-      setAmoePreview(r);
-      setStatus("AMOE preview ready (not posted).");
-    } catch (e) {
-      setErr(e.message || "AMOE preview failed.");
-    }
+        const r = await apiPost("/api/admin/amoe/preview", { targetNumber: amoeTarget });
+        setAmoePreview(r);
+        setStatus("AMOE preview ready (not posted).");
+      } catch (e) {
+        setErr(errMsg(e, "AMOE preview failed."));
+      }
+    });
   }
 
   async function amoeResolve() {
-    try {
-      setStatus("");
-      setErr("");
+    await withBusy(async () => {
+      try {
+        setStatus("");
+        setErr("");
 
-      if (amoeTarget.length !== 3) throw new Error("Enter exactly 3 digits for AMOE target.");
+        if (amoeTarget.length !== 3) throw new Error("Enter exactly 3 digits for AMOE target.");
 
-      const confirmText =
-        `RESOLVE AMOE as ${amoeTarget}?\n\n` +
-        `This action is IRREVERSIBLE.\n` +
-        `Winner: Closest DFT, then earliest AMOE timestamp.\n\n` +
-        `Proceed?`;
+        const confirmText =
+          `RESOLVE AMOE as ${amoeTarget}?\n\n` +
+          `This action is IRREVERSIBLE.\n` +
+          `Winner: Closest DFT, then earliest AMOE timestamp.\n\n` +
+          `Proceed?`;
 
-      if (!window.confirm(confirmText)) return;
+        if (!window.confirm(confirmText)) return;
 
-      await apiPost("/api/admin/amoe/resolve", { targetNumber: amoeTarget });
-      setStatus("AMOE results posted.");
-      setAmoePreview(null);
-      setShowAmoePreviewDetails(false);
-      await refresh();
-    } catch (e) {
-      setErr(e.message || "Failed to resolve AMOE.");
-    }
+        await apiPost("/api/admin/amoe/resolve", { targetNumber: amoeTarget });
+        setStatus("AMOE results posted.");
+        setAmoePreview(null);
+        setShowAmoePreviewDetails(false);
+        await refresh();
+      } catch (e) {
+        setErr(errMsg(e, "Failed to resolve AMOE."));
+      }
+    });
   }
 
   async function amoeResetCycle() {
-    try {
-      setStatus("");
-      setErr("");
+    await withBusy(async () => {
+      try {
+        setStatus("");
+        setErr("");
 
-      const confirmText =
-        `RESET AMOE CYCLE?\n\n` +
-        `This starts collecting a new AMOE set toward 500.\n` +
-        `Proceed?`;
+        const confirmText =
+          `RESET AMOE CYCLE?\n\n` +
+          `This starts collecting a new AMOE set toward 500.\n` +
+          `Proceed?`;
 
-      if (!window.confirm(confirmText)) return;
+        if (!window.confirm(confirmText)) return;
 
-      await apiPost("/api/admin/amoe/reset-cycle", {});
-      setAmoePreview(null);
-      setShowAmoePreviewDetails(false);
-      setStatus("AMOE cycle reset.");
-      await refresh();
-    } catch (e) {
-      setErr(e.message || "Failed to reset AMOE cycle.");
-    }
+        await apiPost("/api/admin/amoe/reset-cycle", {});
+        setAmoePreview(null);
+        setShowAmoePreviewDetails(false);
+        setStatus("AMOE cycle reset.");
+        await refresh();
+      } catch (e) {
+        setErr(errMsg(e, "Failed to reset AMOE cycle."));
+      }
+    });
   }
 
   // Derived (safe) UI values
   const active = state?.activeContest || null;
   const paidActivated = !!active?.activatedAt;
   const paidMode = String(active?.mode || "PICK3");
+
+  // Disable “post” when last contest is already resolved (backend also blocks)
   const paidResolved = !!state?.lastContest?.resolved;
 
   const amoe = state?.amoe || null;
@@ -453,7 +500,13 @@ export default function Admin() {
           ) : null}
         </div>
 
-        <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} onSubmit={adminLoginSubmit} err={err} />
+        <LoginModal
+          open={loginOpen}
+          onClose={() => setLoginOpen(false)}
+          onSubmit={adminLoginSubmit}
+          err={err}
+          busy={loginBusy}
+        />
       </main>
     );
   }
@@ -477,6 +530,7 @@ export default function Admin() {
             onClick={refresh}
             title="Refresh"
             aria-label="Refresh"
+            disabled={busy}
             style={{
               width: 40,
               height: 36,
@@ -484,6 +538,7 @@ export default function Admin() {
               display: "grid",
               placeItems: "center",
               borderRadius: 12,
+              opacity: busy ? 0.6 : 1,
             }}
           >
             ↻
@@ -494,6 +549,7 @@ export default function Admin() {
             onClick={() => (window.location.href = "/")}
             title="Exit"
             aria-label="Exit to landing"
+            disabled={busy}
             style={{
               width: 40,
               height: 36,
@@ -501,6 +557,7 @@ export default function Admin() {
               display: "grid",
               placeItems: "center",
               borderRadius: 12,
+              opacity: busy ? 0.6 : 1,
             }}
           >
             ⤴
@@ -521,10 +578,10 @@ export default function Admin() {
               </div>
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                <button className="secondary" onClick={() => setContestMode("PICK3")}>
+                <button className="secondary" onClick={() => setContestMode("PICK3")} disabled={busy}>
                   Set Mode: PICK3
                 </button>
-                <button className="secondary" onClick={() => setContestMode("DAILY4")}>
+                <button className="secondary" onClick={() => setContestMode("DAILY4")} disabled={busy}>
                   Set Mode: DAILY4 (Hidden)
                 </button>
               </div>
@@ -540,16 +597,17 @@ export default function Admin() {
                   placeholder={paidDigits() === 4 ? "0000–9999" : "000–999"}
                   value={paidTarget}
                   onChange={(e) => setPaidTargetRaw(e.target.value)}
+                  disabled={busy}
                 />
 
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  <button className="secondary" onClick={paidDoPreview} disabled={paidTarget.length !== paidDigits()}>
+                  <button className="secondary" onClick={paidDoPreview} disabled={busy || paidTarget.length !== paidDigits()}>
                     Preview Winner
                   </button>
                   <button
                     className="primary"
                     onClick={paidPostResults}
-                    disabled={paidTarget.length !== paidDigits() || paidResolved}
+                    disabled={busy || paidTarget.length !== paidDigits() || paidResolved}
                   >
                     Post Paid Results (Irreversible)
                   </button>
@@ -570,6 +628,7 @@ export default function Admin() {
                         className="secondary"
                         onClick={() => setShowPaidPreviewDetails((v) => !v)}
                         style={{ padding: "8px 10px" }}
+                        disabled={busy}
                       >
                         {showPaidPreviewDetails ? "Hide" : "Details"}
                       </button>
@@ -614,11 +673,12 @@ export default function Admin() {
                     className="secondary"
                     onClick={paidActivateSunday}
                     style={{ borderColor: "rgba(201,75,75,0.45)" }}
+                    disabled={busy}
                   >
                     Sunday Reset Action: Activate Current Contest (Apply Queued)
                   </button>
 
-                  <button className="secondary" onClick={exportPaid}>
+                  <button className="secondary" onClick={exportPaid} disabled={busy}>
                     Export Paid Summary (JSON)
                   </button>
 
@@ -709,19 +769,9 @@ export default function Admin() {
                   Add AMOE Entry (Manual)
                 </div>
 
-                <input
-                  className="field"
-                  placeholder="Full legal name"
-                  value={amoeName}
-                  onChange={(e) => setAmoeName(e.target.value)}
-                />
-                <input className="field" placeholder="Email" value={amoeEmail} onChange={(e) => setAmoeEmail(e.target.value)} />
-                <input
-                  className="field"
-                  placeholder="Mailing address"
-                  value={amoeAddress}
-                  onChange={(e) => setAmoeAddress(e.target.value)}
-                />
+                <input className="field" placeholder="Full legal name" value={amoeName} onChange={(e) => setAmoeName(e.target.value)} disabled={busy} />
+                <input className="field" placeholder="Email" value={amoeEmail} onChange={(e) => setAmoeEmail(e.target.value)} disabled={busy} />
+                <input className="field" placeholder="Mailing address" value={amoeAddress} onChange={(e) => setAmoeAddress(e.target.value)} disabled={busy} />
                 <input
                   className="field"
                   type="text"
@@ -729,12 +779,13 @@ export default function Admin() {
                   placeholder="AMOE guess (000–999)"
                   value={amoeGuess}
                   onChange={(e) => setAmoeGuessRaw(e.target.value)}
+                  disabled={busy}
                 />
 
                 <button
                   className="primary"
                   onClick={amoeAdd}
-                  disabled={amoeStatus !== "COLLECTING" || amoeGuess.length !== 3}
+                  disabled={busy || amoeStatus !== "COLLECTING" || amoeGuess.length !== 3}
                 >
                   Add AMOE Entry
                 </button>
@@ -752,21 +803,21 @@ export default function Admin() {
                   placeholder="AMOE target (Pick3 result)"
                   value={amoeTarget}
                   onChange={(e) => setAmoeTargetRaw(e.target.value)}
-                  disabled={amoeStatus !== "READY"}
+                  disabled={busy || amoeStatus !== "READY"}
                 />
 
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                   <button
                     className="secondary"
                     onClick={amoeDoPreview}
-                    disabled={amoeStatus !== "READY" || amoeTarget.length !== 3}
+                    disabled={busy || amoeStatus !== "READY" || amoeTarget.length !== 3}
                   >
                     Preview AMOE Winner
                   </button>
                   <button
                     className="primary"
                     onClick={amoeResolve}
-                    disabled={amoeStatus !== "READY" || amoeTarget.length !== 3}
+                    disabled={busy || amoeStatus !== "READY" || amoeTarget.length !== 3}
                   >
                     Post AMOE Results (Irreversible)
                   </button>
@@ -787,6 +838,7 @@ export default function Admin() {
                         className="secondary"
                         onClick={() => setShowAmoePreviewDetails((v) => !v)}
                         style={{ padding: "8px 10px" }}
+                        disabled={busy}
                       >
                         {showAmoePreviewDetails ? "Hide" : "Details"}
                       </button>
@@ -829,13 +881,14 @@ export default function Admin() {
                 ) : null}
 
                 <div style={{ display: "grid", gap: 8, marginTop: 6 }}>
-                  <button className="secondary" onClick={exportAmoe}>
+                  <button className="secondary" onClick={exportAmoe} disabled={busy}>
                     Export AMOE Summary (JSON)
                   </button>
                   <button
                     className="secondary"
                     onClick={amoeResetCycle}
                     style={{ borderColor: "rgba(201,75,75,0.45)" }}
+                    disabled={busy}
                   >
                     Reset AMOE Cycle (Start New Collection)
                   </button>
@@ -853,6 +906,12 @@ export default function Admin() {
         {err ? (
           <p className="status" style={{ color: "#ffb2b2", marginTop: 10 }}>
             {err}
+          </p>
+        ) : null}
+
+        {busy ? (
+          <p className="status" style={{ opacity: 0.6, marginTop: 6 }}>
+            Working…
           </p>
         ) : null}
       </div>

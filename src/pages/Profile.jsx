@@ -18,6 +18,11 @@ function formatDateTime(ts) {
   return new Date(ts).toLocaleString();
 }
 
+// Stripe feature flag (frontend)
+const STRIPE_ENABLED = String(import.meta.env.VITE_STRIPE_ENABLED || "")
+  .toLowerCase()
+  .trim() === "true";
+
 /* ---------- Accessible Modal (ESC + focus trap + focus return) ---------- */
 function getFocusable(root) {
   if (!root) return [];
@@ -264,6 +269,31 @@ export default function Profile() {
     }
   }, []);
 
+  const entryStatusUpper = useMemo(
+    () => String(myEntry?.status || "").toUpperCase(),
+    [myEntry?.status]
+  );
+
+  // ✅ CRITICAL: "Locked" means PAID only.
+  const paidLocked =
+    !!myEntry?.paid ||
+    entryStatusUpper === "PAID" ||
+    entryStatusUpper === "PAID_LOCKED" ||
+    entryStatusUpper === "LOCKED_PAID";
+
+  // ✅ IMPORTANT: pendingPayment should only exist when Stripe is enabled
+  const pendingPayment =
+    STRIPE_ENABLED &&
+    !!myEntry?.guess &&
+    !paidLocked &&
+    (entryStatusUpper.includes("PENDING") ||
+      entryStatusUpper.includes("AWAIT") ||
+      entryStatusUpper.includes("UNPAID") ||
+      entryStatusUpper.includes("CHECKOUT") ||
+      entryStatusUpper.includes("PAYMENT"));
+
+  const locked = paidLocked;
+
   async function refresh() {
     setErr("");
     setLoading(true);
@@ -279,22 +309,34 @@ export default function Profile() {
       const c = await apiGet("/api/contest");
       setContest(c && typeof c === "object" ? c : null);
 
-      // locked entry (active contest)
-      try {
-        const e = await apiGet("/api/my-entry");
+      // Parallelize the optional calls for faster load
+      const [entryRes, passRes, lastWeekRes] = await Promise.allSettled([
+        apiGet("/api/my-entry"),
+        apiGet("/api/my-pass"),
+        apiGet("/api/last-week"),
+      ]);
+
+      // Entry
+      if (entryRes.status === "fulfilled") {
+        const e = entryRes.value;
         setMyEntry(e?.ok ? e.entry : null);
         setMyEntryMeta({
           contestId: e?.contestId || null,
           contestActivatedAt: e?.contestActivatedAt ?? null,
         });
-      } catch {
+
+        // Prefill guess only when NOT paid
+        if (e?.ok && e?.entry?.guess && !(e?.entry?.paid)) {
+          setGuessRaw(String(e.entry.guess));
+        }
+      } else {
         setMyEntry(null);
         setMyEntryMeta({ contestId: null, contestActivatedAt: null });
       }
 
-      // OPTIONAL: pass status
-      try {
-        const p = await apiGet("/api/my-pass");
+      // Pass
+      if (passRes.status === "fulfilled") {
+        const p = passRes.value;
         if (p && typeof p === "object" && ("active" in p || "passActive" in p || p?.ok)) {
           setPassSupported(true);
           setPassActive(!!(p.active ?? p.passActive));
@@ -302,24 +344,24 @@ export default function Profile() {
           setPassSupported(false);
           setPassActive(false);
         }
-      } catch {
+      } else {
         setPassSupported(false);
         setPassActive(false);
       }
 
-      // OPTIONAL: last week
-      try {
-        const lw = await apiGet("/api/last-week");
+      // Last week
+      if (lastWeekRes.status === "fulfilled") {
+        const lw = lastWeekRes.value;
         setLastWeek(lw?.ok ? lw : null);
-      } catch {
+      } else {
         setLastWeek(null);
       }
 
-      // checkout message
-      if (checkoutResult === "success") {
+      // Checkout message (only meaningful when Stripe enabled)
+      if (STRIPE_ENABLED && checkoutResult === "success") {
         setStatus("Payment received. Your entry is recorded.");
-      } else if (checkoutResult === "cancel") {
-        setStatus((prev) => prev || "Checkout canceled. No entry was submitted.");
+      } else if (STRIPE_ENABLED && checkoutResult === "cancel") {
+        setStatus("Checkout canceled. No entry was submitted.");
       } else {
         setStatus("");
       }
@@ -331,8 +373,6 @@ export default function Profile() {
   }
 
   useEffect(() => {
-    if (checkoutResult === "success") setStatus("Payment received. Your entry is recorded.");
-    if (checkoutResult === "cancel") setStatus("Checkout canceled. No entry was submitted.");
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -341,10 +381,9 @@ export default function Profile() {
   const endsOn = contest?.endsOn ?? null;
   const activatedAt = contest?.activatedAt ?? null;
 
-  const locked = !!myEntry?.guess;
   const needsPass = passSupported ? !passActive : false;
 
-  const canLock =
+  const canProceed =
     !loading &&
     !busy &&
     !locked &&
@@ -375,26 +414,35 @@ export default function Profile() {
     setStatus("Game pass purchase is not yet enabled on this build.");
   }
 
-  async function lockSubmission() {
+  async function beginCheckout(useExistingGuess = false) {
+    // ✅ If Stripe is not enabled, never enter pending states or scary UX.
+    if (!STRIPE_ENABLED) {
+      setErr("");
+      setStatus("Payments are not enabled yet on this build.");
+      setConfirmOpen(false);
+      return;
+    }
+
     try {
       setErr("");
       setStatus("");
       setBusy(true);
 
-      const clean = padGuess(guessRaw, 3);
+      const clean = padGuess(useExistingGuess ? (myEntry?.guess ?? guessRaw) : guessRaw, 3);
       if (onlyDigits(clean).length !== 3) throw new Error("Enter a 3-digit number.");
 
       const r = await apiPost("/api/checkout", { guess: clean });
+      if (!r?.url) throw new Error("Checkout not available.");
       window.location.assign(r.url);
     } catch (e) {
-      setErr(e?.message || "Failed to lock.");
+      setErr(e?.message || "Failed to start checkout.");
     } finally {
       setBusy(false);
       setConfirmOpen(false);
     }
   }
 
-  const AmoiPreCheckoutNotice = ({ compact = false }) => (
+  const AmoeCompactNotice = ({ compact = false }) => (
     <div
       style={{
         marginTop: compact ? 8 : 10,
@@ -408,62 +456,33 @@ export default function Profile() {
       aria-label="No purchase necessary disclosure"
     >
       <div style={{ fontWeight: 900, letterSpacing: "0.02em", marginBottom: 6 }}>
-        No purchase necessary (AMOE)
+        No purchase necessary.
       </div>
       <div className="miniMuted" style={{ marginBottom: 6 }}>
-        A free mail-in Alternate Method of Entry (AMOE) is available. You may enter once per contest
-        by either payment or AMOE—no advantage to paying.
+        Free mail-in entry option available.
       </div>
-      <div className="miniMuted">
-        By continuing, you agree to the{" "}
-        <button
-          type="button"
-          className="linkLike"
-          onClick={() => nav("/terms")}
-          disabled={busy}
-          style={{
-            padding: 0,
-            border: "none",
-            background: "transparent",
-            color: "inherit",
-            textDecoration: "underline",
-            cursor: busy ? "default" : "pointer",
-          }}
-        >
-          Official Rules / Terms
-        </button>
-        .
-      </div>
-    </div>
-  );
-
-  const FinalityNotice = ({ compact = false }) => (
-    <div
-      className="miniMuted"
-      style={{
-        marginTop: compact ? 8 : 10,
-        padding: "10px 12px",
-        borderRadius: 12,
-        border: "1px solid rgba(255,255,255,0.10)",
-        background: "rgba(255,255,255,0.012)",
-        textAlign: "left",
-        lineHeight: 1.25,
-      }}
-      aria-label="Finality and refunds notice"
-    >
-      Entries are final after lock. No refunds after lock.{" "}
-      {endsOn ? <>This contest ends on <strong>{endsOn}</strong>.</> : null}
+      <button
+        type="button"
+        className="linkLike"
+        onClick={() => nav("/terms")}
+        disabled={busy}
+        style={{
+          padding: 0,
+          border: "none",
+          background: "transparent",
+          color: "inherit",
+          textDecoration: "underline",
+          cursor: busy ? "default" : "pointer",
+        }}
+      >
+        Terms &amp; Conditions
+      </button>
     </div>
   );
 
   return (
     <>
-      <PanelShell
-        /* Match Landing/Join: no visible header label */
-        label=""
-        labelClass="profile"
-        footer={null}
-      >
+      <PanelShell label="" labelClass="profile" footer={null}>
         <div style={{ display: "grid", gap: 12 }}>
           {loading ? <div className="fineprint">Loading…</div> : null}
           {err ? <div className="error">{err}</div> : null}
@@ -530,7 +549,39 @@ export default function Profile() {
               </>
             )}
 
-            {!needsPass && !locked && (
+            {/* Pending payment notice (only when Stripe enabled) */}
+            {!needsPass && STRIPE_ENABLED && pendingPayment && !locked && (
+              <div
+                className="miniMuted"
+                style={{
+                  marginBottom: 10,
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  background: "rgba(255,255,255,0.015)",
+                  textAlign: "left",
+                  lineHeight: 1.25,
+                }}
+              >
+                <div style={{ fontWeight: 900, marginBottom: 6 }}>Checkout in progress</div>
+                <div style={{ marginBottom: 10 }}>
+                  Your entry is recorded only after payment is completed. You can resume checkout or change your guess and
+                  try again.
+                </div>
+
+                <div className="form" style={{ marginTop: 0 }}>
+                  <button className="primary" onClick={() => beginCheckout(true)} disabled={busy}>
+                    Continue to checkout
+                  </button>
+                  <button className="secondary" onClick={refresh} disabled={busy}>
+                    Refresh
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Normal flow when not locked (and either Stripe off, or no pending) */}
+            {!needsPass && !locked && (!STRIPE_ENABLED || !pendingPayment) && (
               <>
                 <div className="miniMuted" style={{ marginBottom: 8 }}>
                   No submission locked for this week.
@@ -542,17 +593,23 @@ export default function Profile() {
                   disabled={busy || !cutoffAt}
                 />
 
-                <AmoiPreCheckoutNotice />
-                <FinalityNotice />
+                <AmoeCompactNotice />
 
                 <div className="form" style={{ marginTop: 10 }}>
                   <button
                     ref={lockBtnRef}
                     className="primary"
-                    disabled={!canLock}
-                    onClick={() => setConfirmOpen(true)}
+                    disabled={!canProceed}
+                    onClick={() => {
+                      if (!STRIPE_ENABLED) {
+                        setErr("");
+                        setStatus("Payments are not enabled yet on this build.");
+                        return;
+                      }
+                      setConfirmOpen(true);
+                    }}
                   >
-                    Lock submission
+                    Continue to checkout
                   </button>
                 </div>
               </>
@@ -560,7 +617,7 @@ export default function Profile() {
 
             {locked && (
               <>
-                <DigitBox value={String(myEntry.guess)} onChange={() => {}} disabled />
+                <DigitBox value={String(myEntry?.guess || "")} onChange={() => {}} disabled />
 
                 {isQueued || contestNotActivated ? (
                   <div
@@ -577,7 +634,8 @@ export default function Profile() {
                   >
                     <div style={{ fontWeight: 900, marginBottom: 6 }}>Queued for next week</div>
                     <div>
-                      Entries submitted after cutoff are saved immediately, but the prize display updates after the Sunday reset.
+                      Entries submitted after cutoff are saved immediately, but the prize display updates after the Sunday
+                      reset.
                     </div>
                   </div>
                 ) : null}
@@ -585,11 +643,11 @@ export default function Profile() {
                 <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
                     <span className="label">Submission</span>
-                    <span className="value">{myEntry.guess}</span>
+                    <span className="value">{myEntry?.guess ?? "—"}</span>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
                     <span className="label">Locked at</span>
-                    <span className="value">{formatDateTime(myEntry.timestamp)}</span>
+                    <span className="value">{formatDateTime(myEntry?.timestamp)}</span>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
                     <span className="label">Game ending on</span>
@@ -622,18 +680,22 @@ export default function Profile() {
 
               <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <span className="label">Submission</span>
-                <span className="value">{locked ? myEntry.guess : "—"}</span>
+                <span className="value">{locked ? myEntry?.guess : "—"}</span>
               </div>
 
               <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <span className="label">Locked timestamp</span>
-                <span className="value">{locked ? formatDateTime(myEntry.timestamp) : "—"}</span>
+                <span className="value">{locked ? formatDateTime(myEntry?.timestamp) : "—"}</span>
               </div>
 
               <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <span className="label">Entry status</span>
                 <span className="value">
-                  {locked ? String(myEntry.status || (myEntry.paid ? "PAID" : "PENDING")) : "—"}
+                  {locked
+                    ? String(myEntry?.status || "PAID_LOCKED")
+                    : STRIPE_ENABLED && pendingPayment
+                    ? String(myEntry?.status || "CHECKOUT_IN_PROGRESS")
+                    : "—"}
                 </span>
               </div>
 
@@ -694,12 +756,12 @@ export default function Profile() {
 
       <Modal
         open={confirmOpen}
-        title="Confirm lock"
+        title="Confirm"
         onClose={() => setConfirmOpen(false)}
         initialFocusRef={lockBtnRef}
         actions={
           <div className="form" style={{ marginTop: 0 }}>
-            <button className="primary" onClick={lockSubmission} disabled={busy || !canLock}>
+            <button className="primary" onClick={() => beginCheckout(false)} disabled={busy || !canProceed}>
               Continue to checkout
             </button>
             <button className="secondary" onClick={() => setConfirmOpen(false)} disabled={busy}>
@@ -709,17 +771,8 @@ export default function Profile() {
         }
       >
         <div className="miniMuted" style={{ marginBottom: 10 }}>
-          You are about to lock in <strong>{guess.padStart(3, "0")}</strong>. This cannot be changed.
-        </div>
-
-        <div className="miniMuted" style={{ marginBottom: 8 }}>
-          Entries are final after lock. No refunds after lock.
-          {endsOn ? (
-            <>
-              {" "}
-              This contest ends on <strong>{endsOn}</strong>.
-            </>
-          ) : null}
+          You are about to proceed to payment for <strong>{guess.padStart(3, "0")}</strong>. Your entry is recorded{" "}
+          <strong>only after payment is confirmed</strong>.
         </div>
 
         <div className="miniMuted" style={{ marginBottom: 8 }}>
@@ -742,7 +795,7 @@ export default function Profile() {
               cursor: busy ? "default" : "pointer",
             }}
           >
-            Official Rules / Terms
+            Terms &amp; Conditions
           </button>
           .
         </div>
