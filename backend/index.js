@@ -10,7 +10,6 @@ import healthRoutes from "./routes/health.js";
 import stripeWebhookRoutes from "./routes/stripeWebhook.js";
 import requireUser from "./middleware/auth.js";
 import publicRoutes from "./routes/public.js";
-import myEntryRoutes from "./routes/myEntry.js";
 import checkoutRoutes from "./routes/checkout.js";
 import adminRoutes from "./routes/admin.js";
 
@@ -31,7 +30,6 @@ app.use(
       const o = String(origin).replace(/\/+$/, "");
       if (ALLOWED_ORIGINS.includes(o)) return cb(null, true);
 
-      // reject
       return cb(new Error("Not allowed by CORS"));
     },
     credentials: true,
@@ -59,14 +57,11 @@ app.use(express.json());
 // Public
 app.use(publicRoutes);
 
-// My entry (auth)
-app.use(myEntryRoutes);
-
 // Checkout (auth)
-app.use(checkoutRoutes);
+app.use(requireUser, checkoutRoutes);
 
-// Admin
-app.use(adminRoutes);
+// Admin (auth)
+app.use(requireUser, adminRoutes);
 
 /* =========================================================
    FALLBACKS
@@ -79,7 +74,6 @@ app.use((req, res) => {
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   const msg = String(err?.message || "Server error.");
-  // CORS errors, etc.
   const status = msg.toLowerCase().includes("cors") ? 403 : 500;
   res.status(status).json({ error: msg });
 });
