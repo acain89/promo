@@ -111,6 +111,11 @@ export default function Join() {
     }
   }
 
+  function resetMessages() {
+    setErr("");
+    setStatus("");
+  }
+
   return (
     <PanelShell
       /* Match Landing: no visible header label */
@@ -134,7 +139,13 @@ export default function Join() {
 
             {/* LOGIN */}
             {view === "LOGIN" && (
-              <div className="form">
+              <form
+                className="form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!busy) doLogin();
+                }}
+              >
                 <input
                   className="field"
                   placeholder="Username"
@@ -154,29 +165,52 @@ export default function Join() {
                   disabled={busy}
                 />
 
-                <button className="primary" onClick={doLogin} disabled={busy}>
+                <button className="primary" type="submit" disabled={busy}>
                   Log In
                 </button>
 
-                <button className="secondary" onClick={() => setView("SIGNUP")} disabled={busy}>
+                <button
+                  className="secondary"
+                  type="button"
+                  onClick={() => {
+                    resetMessages();
+                    setView("SIGNUP");
+                  }}
+                  disabled={busy}
+                >
                   Create Account
                 </button>
 
-                <button className="secondary" onClick={() => setView("FORGOT")} disabled={busy}>
+                <button
+                  className="secondary"
+                  type="button"
+                  onClick={() => {
+                    resetMessages();
+                    setView("FORGOT");
+                  }}
+                  disabled={busy}
+                >
                   Forgot Password
                 </button>
-              </div>
+              </form>
             )}
 
             {/* SIGNUP */}
             {view === "SIGNUP" && (
-              <div className="form">
+              <form
+                className="form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!busy) doSignup();
+                }}
+              >
                 <input
                   className="field"
                   placeholder="Username"
                   value={suUn}
                   onChange={(e) => setSuUn(e.target.value)}
                   disabled={busy}
+                  autoComplete="username"
                 />
 
                 <input
@@ -185,6 +219,7 @@ export default function Join() {
                   value={suEmail}
                   onChange={(e) => setSuEmail(e.target.value)}
                   disabled={busy}
+                  autoComplete="email"
                 />
 
                 <input
@@ -194,37 +229,61 @@ export default function Join() {
                   value={suPw}
                   onChange={(e) => setSuPw(e.target.value)}
                   disabled={busy}
+                  autoComplete="new-password"
                 />
 
-                <button className="primary" onClick={doSignup} disabled={busy}>
+                <button className="primary" type="submit" disabled={busy}>
                   Create Account
                 </button>
 
-                <button className="secondary" onClick={() => setView("LOGIN")} disabled={busy}>
+                <button
+                  className="secondary"
+                  type="button"
+                  onClick={() => {
+                    resetMessages();
+                    setView("LOGIN");
+                  }}
+                  disabled={busy}
+                >
                   Back
                 </button>
-              </div>
+              </form>
             )}
 
             {/* FORGOT */}
             {view === "FORGOT" && (
-              <div className="form">
+              <form
+                className="form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!busy) doForgot();
+                }}
+              >
                 <input
                   className="field"
                   placeholder="Email"
                   value={fpEmail}
                   onChange={(e) => setFpEmail(e.target.value)}
                   disabled={busy}
+                  autoComplete="email"
                 />
 
-                <button className="primary" onClick={doForgot} disabled={busy}>
+                <button className="primary" type="submit" disabled={busy}>
                   Send Reset Link
                 </button>
 
-                <button className="secondary" onClick={() => setView("LOGIN")} disabled={busy}>
+                <button
+                  className="secondary"
+                  type="button"
+                  onClick={() => {
+                    resetMessages();
+                    setView("LOGIN");
+                  }}
+                  disabled={busy}
+                >
                   Back
                 </button>
-              </div>
+              </form>
             )}
           </>
         )}
