@@ -2,11 +2,21 @@
 import { Router } from "express";
 
 import { db } from "../lib/firestore.js";
-import { ensureActiveContestNow, mostRecentChicagoCutoffAtOrBefore, contestIdFromCutoffMs, getOrInitAmoeState, getContestForEntryTime } from "../lib/time.js";
+import {
+  ensureActiveContestNow,
+  mostRecentChicagoCutoffAtOrBefore,
+  contestIdFromCutoffMs,
+} from "../lib/time.js";
 import { nowMs, mmddyyyyFromCutoffMs } from "../lib/utils.js";
 import requireUser from "../middleware/auth.js";
+import { STRIPE_SECRET_KEY, NODE_ENV } from "../lib/config.js";
 
 const r = Router();
+
+function paymentsEnabled() {
+  // "Enabled" means Stripe is configured AND we're running production cookies/cors rules.
+  return NODE_ENV === "production" && !!STRIPE_SECRET_KEY;
+}
 
 /* =========================================================
    PUBLIC — CONTEST STATE (ACTIVE CONTEST)
@@ -20,6 +30,10 @@ r.get("/api/contest", async (req, res) => {
     return res.json({
       ok: true,
       serverNow: nowMs(),
+
+      // Payment gating signal for the frontend
+      paymentsEnabled: paymentsEnabled(),
+
       id: contest.id || null,
       mode: contest.mode || "PICK3",
       cutoffAt: contest.cutoffAt ?? null,
@@ -78,17 +92,25 @@ r.get("/api/reveal-state", async (req, res) => {
     const paid = paidSnap.exists ? paidSnap.data() : null;
 
     const paidWinnerSnap = await db().collection("winners").orderBy("resolvedAt", "desc").limit(1).get();
-    const paidWinner = paidWinnerSnap.empty ? null : { id: paidWinnerSnap.docs[0].id, ...paidWinnerSnap.docs[0].data() };
+    const paidWinner = paidWinnerSnap.empty
+      ? null
+      : { id: paidWinnerSnap.docs[0].id, ...paidWinnerSnap.docs[0].data() };
 
     const amoeStateSnap = await db().collection("amoe").doc("state").get();
     const amoeState = amoeStateSnap.exists ? amoeStateSnap.data() : null;
 
     const amoeWinnerSnap = await db().collection("amoeWinners").orderBy("resolvedAt", "desc").limit(1).get();
-    const amoeWinner = amoeWinnerSnap.empty ? null : { id: amoeWinnerSnap.docs[0].id, ...amoeWinnerSnap.docs[0].data() };
+    const amoeWinner = amoeWinnerSnap.empty
+      ? null
+      : { id: amoeWinnerSnap.docs[0].id, ...amoeWinnerSnap.docs[0].data() };
 
     return res.json({
       ok: true,
       serverNow: nowMs(),
+
+      // Optional: expose payment flag here too (helpful for Reveal page)
+      paymentsEnabled: paymentsEnabled(),
+
       paid: paid
         ? {
             id: paid.id || paidId,
