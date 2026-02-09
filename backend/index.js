@@ -1,6 +1,7 @@
 // backend/index.js
 import express from "express";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 
 import { NODE_ENV, PORT, ALLOWED_ORIGINS } from "./lib/config.js";
 import { initFirestore } from "./lib/firestore.js";
@@ -8,6 +9,8 @@ import { ensureActiveContestNow, getOrInitAmoeState } from "./lib/time.js";
 
 import healthRoutes from "./routes/health.js";
 import stripeWebhookRoutes from "./routes/stripeWebhook.js";
+import authRoutes from "./routes/auth.js";
+
 import requireUser from "./middleware/auth.js";
 import publicRoutes from "./routes/public.js";
 import checkoutRoutes from "./routes/checkout.js";
@@ -51,17 +54,20 @@ app.use(healthRoutes);
 // Stripe webhook MUST be mounted before express.json()
 app.use("/api/stripe/webhook", stripeWebhookRoutes());
 
-// JSON for everything else
+// JSON + cookies for everything else
 app.use(express.json());
+app.use(cookieParser());
+
+// Auth endpoints
+app.use(authRoutes);
 
 // Public
 app.use(publicRoutes);
 
-// Checkout (auth)
+// Protected
 app.use(requireUser, checkoutRoutes);
-
-// Admin (auth)
 app.use(requireUser, adminRoutes);
+
 
 /* =========================================================
    FALLBACKS
