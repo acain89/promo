@@ -459,7 +459,7 @@ export default function Profile() {
         No purchase necessary.
       </div>
       <div className="miniMuted" style={{ marginBottom: 6 }}>
-        Free mail-in entry option available.
+        Free mail-in entry option available. Void where prohibited.
       </div>
       <button
         type="button"
@@ -475,7 +475,7 @@ export default function Profile() {
           cursor: busy ? "default" : "pointer",
         }}
       >
-        Terms &amp; Conditions
+        Official Rules
       </button>
     </div>
   );
@@ -776,7 +776,7 @@ export default function Profile() {
         </div>
 
         <div className="miniMuted" style={{ marginBottom: 8 }}>
-          One entry per person per contest (paid or AMOE). No purchase necessary.
+          One entry per person per contest (paid or AMOE). No purchase necessary. Void where prohibited.
         </div>
 
         <div className="miniMuted">
@@ -795,7 +795,7 @@ export default function Profile() {
               cursor: busy ? "default" : "pointer",
             }}
           >
-            Terms &amp; Conditions
+            Official Rules
           </button>
           .
         </div>

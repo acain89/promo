@@ -1,4 +1,5 @@
 // backend/middleware/admin.js
+import crypto from "crypto";
 import { ADMIN_TOKEN_SECRET } from "../lib/config.js";
 import { b64urlJson, b64urlJsonParse, hmacSign, nowMs } from "../lib/utils.js";
 
@@ -9,6 +10,17 @@ export function signAdminToken(payload) {
   return `${body}.${sig}`;
 }
 
+function safeEqual(a, b) {
+  try {
+    const ba = Buffer.from(String(a || ""), "utf8");
+    const bb = Buffer.from(String(b || ""), "utf8");
+    if (ba.length !== bb.length) return false;
+    return crypto.timingSafeEqual(ba, bb);
+  } catch {
+    return false;
+  }
+}
+
 function verifyAdminToken(token) {
   if (!ADMIN_TOKEN_SECRET) return null;
   const parts = String(token || "").split(".");
@@ -16,7 +28,7 @@ function verifyAdminToken(token) {
   const [body, sig] = parts;
 
   const expected = hmacSign(body, ADMIN_TOKEN_SECRET);
-  if (sig !== expected) return null;
+  if (!safeEqual(sig, expected)) return null;
 
   let payload;
   try {
@@ -37,6 +49,9 @@ export default function requireAdmin(req, res, next) {
 
   const payload = verifyAdminToken(m[1]);
   if (!payload) return res.status(401).json({ error: "Unauthorized." });
+
+  // helpful for logging / future role checks
+  req.admin = payload;
 
   next();
 }

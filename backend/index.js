@@ -22,22 +22,41 @@ const app = express();
 app.set("trust proxy", 1);
 
 /* =========================================================
+   LIGHT SECURITY HEADERS (no deps)
+========================================================= */
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  // keep CSP out for now (easy to break Stripe/inline styles)
+  next();
+});
+
+/* =========================================================
    CORS
 ========================================================= */
+function normalizeOrigin(o) {
+  return String(o || "").trim().replace(/\/+$/, "");
+}
+
+const allowed = ALLOWED_ORIGINS.map(normalizeOrigin);
+
 app.use(
   cors({
     origin: (origin, cb) => {
-      // allow non-browser clients / same-origin
+      // allow non-browser clients / same-origin / server-to-server (Stripe webhooks won't use CORS anyway)
       if (!origin) return cb(null, true);
 
-      const o = String(origin).replace(/\/+$/, "");
-      if (ALLOWED_ORIGINS.includes(o)) return cb(null, true);
+      const o = normalizeOrigin(origin);
+      if (allowed.includes(o)) return cb(null, true);
 
       return cb(new Error("Not allowed by CORS"));
     },
     credentials: true,
   })
 );
+
+// Make preflights reliable (esp. with cookies)
+app.options("*", cors());
 
 /* =========================================================
    FIRESTORE INIT
@@ -52,6 +71,8 @@ initFirestore();
 app.use(healthRoutes);
 
 // Stripe webhook MUST be mounted before express.json()
+// NOTE: stripeWebhookRoutes() already uses express.raw() internally.
+// Do NOT wrap it with express.raw() again here.
 app.use("/api/stripe/webhook", stripeWebhookRoutes());
 
 // JSON + cookies for everything else
@@ -64,10 +85,13 @@ app.use(authRoutes);
 // Public
 app.use(publicRoutes);
 
-// Protected
-app.use(requireUser, checkoutRoutes);
-app.use(requireUser, adminRoutes);
+// Admin routes:
+// - /api/admin/login must be reachable WITHOUT user session
+// - all other admin endpoints enforce requireAdmin inside routes/admin.js
+app.use(adminRoutes);
 
+// Protected (user session required)
+app.use(requireUser, checkoutRoutes);
 
 /* =========================================================
    FALLBACKS

@@ -9,7 +9,6 @@ import { auditLog } from "../lib/audit.js";
 
 /**
  * Helper: update any entry doc(s) matching a paymentIntentId across all contests.
- * We store entries at: entries/{contestId}/items/{userId}
  */
 async function updateEntryByPaymentIntent(paymentIntentId, patch, auditType, stripeObj) {
   if (!paymentIntentId) return;
@@ -34,38 +33,43 @@ async function updateEntryByPaymentIntent(paymentIntentId, patch, auditType, str
       contestId,
       userId,
       paymentIntentId: String(paymentIntentId),
-      stripe: stripeObj ? { id: stripeObj.id || null, object: stripeObj.object || null } : null,
+      stripe: stripeObj
+        ? { id: stripeObj.id || null, object: stripeObj.object || null }
+        : null,
     });
   }
 }
 
 /**
- * Mount this route BEFORE express.json():
- * app.use("/api/stripe/webhook", stripeWebhookRouter())
- *
  * IMPORTANT:
- * Because we mount at "/api/stripe/webhook", the router path here should be "/".
+ * express.raw() is already mounted in index.js.
+ * DO NOT use it again here.
  */
 export default function stripeWebhookRouter() {
   const r = express.Router();
 
-  r.post("/", express.raw({ type: "application/json" }), async (req, res) => {
+  r.post("/", async (req, res) => {
     if (!stripe) return res.status(500).send("Stripe not configured.");
-    if (!STRIPE_WEBHOOK_SECRET) return res.status(500).send("Webhook secret not configured.");
+    if (!STRIPE_WEBHOOK_SECRET)
+      return res.status(500).send("Webhook secret not configured.");
 
     const sig = req.headers["stripe-signature"];
 
     let event;
     try {
-      event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        sig,
+        STRIPE_WEBHOOK_SECRET
+      );
     } catch (err) {
       return res.status(400).send(`Webhook Error: ${err.message}`);
     }
 
     try {
-      /* ---------------------------------------------------------
-         1) Checkout completed -> mark entry PAID
-      --------------------------------------------------------- */
+      /* =========================================================
+         1) Checkout Session Completed
+      ========================================================== */
       if (event.type === "checkout.session.completed") {
         const session = event.data.object;
 
@@ -73,50 +77,43 @@ export default function stripeWebhookRouter() {
         const userId = String(session.metadata?.userId || "").trim();
         if (!contestId || !userId) return res.json({ received: true });
 
-        const entryRef = db().collection("entries").doc(contestId).collection("items").doc(userId);
+        const entryRef = db()
+          .collection("entries")
+          .doc(contestId)
+          .collection("items")
+          .doc(userId);
+
         const contestRef = db().collection("contests").doc(contestId);
 
         await db().runTransaction(async (tx) => {
-          const [entrySnap, contestSnap] = await Promise.all([tx.get(entryRef), tx.get(contestRef)]);
-          if (!entrySnap.exists) return;
-          if (!contestSnap.exists) return;
+          const [entrySnap, contestSnap] = await Promise.all([
+            tx.get(entryRef),
+            tx.get(contestRef),
+          ]);
+
+          if (!entrySnap.exists || !contestSnap.exists) return;
 
           const entry = entrySnap.data();
           const contest = contestSnap.data();
 
-          const alreadyPaid = !!entry.paid;
+          if (entry.paid) return; // Prevent double increment
 
-          const paymentIntentId = session.payment_intent ? String(session.payment_intent) : null;
-          const stripeSessionId = session.id ? String(session.id) : null;
+          const paymentIntentId = session.payment_intent
+            ? String(session.payment_intent)
+            : null;
 
-          // if already paid, just backfill ids if missing
-          if (alreadyPaid) {
-            const patch = {};
-            if (!entry.stripeSessionId && stripeSessionId) patch.stripeSessionId = stripeSessionId;
-            if (!entry.paymentIntentId && paymentIntentId) patch.paymentIntentId = paymentIntentId;
-            if (Object.keys(patch).length) tx.update(entryRef, patch);
-            return;
-          }
-
-          // mark paid
           tx.update(entryRef, {
             paid: true,
             paidAt: nowMs(),
             status: "PAID",
-            stripeSessionId,
+            stripeSessionId: session.id || null,
             paymentIntentId,
           });
 
-          /**
-           * Prize increment rules:
-           * - Only increment if contest NOT resolved
-           * - AND contest is activated
-           * If contest not activated => queue for next week display (status QUEUED)
-           */
           if (!contest.resolved && !!contest.activatedAt) {
             tx.update(contestRef, {
               entryCount: admin.firestore.FieldValue.increment(1),
-              prizeCents: admin.firestore.FieldValue.increment(355), // $3.55 per paid entry
+              prizeCents: admin.firestore.FieldValue.increment(355),
             });
           } else {
             tx.update(entryRef, { status: "QUEUED" });
@@ -131,12 +128,31 @@ export default function stripeWebhookRouter() {
         });
       }
 
-      /* ---------------------------------------------------------
-         2) Refunds
-      --------------------------------------------------------- */
+      /* =========================================================
+         2) Payment Intent Succeeded (backup safety net)
+      ========================================================== */
+      if (event.type === "payment_intent.succeeded") {
+        const pi = event.data.object;
+        await updateEntryByPaymentIntent(
+          pi.id,
+          {
+            paid: true,
+            paidAt: nowMs(),
+            status: "PAID",
+          },
+          "webhook_pi_succeeded",
+          pi
+        );
+      }
+
+      /* =========================================================
+         3) Refunds
+      ========================================================== */
       if (event.type === "charge.refunded") {
         const charge = event.data.object;
-        const pi = charge.payment_intent ? String(charge.payment_intent) : null;
+        const pi = charge.payment_intent
+          ? String(charge.payment_intent)
+          : null;
 
         await updateEntryByPaymentIntent(
           pi,
@@ -151,16 +167,20 @@ export default function stripeWebhookRouter() {
         );
       }
 
-      /* ---------------------------------------------------------
-         3) Disputes
-      --------------------------------------------------------- */
+      /* =========================================================
+         4) Disputes
+      ========================================================== */
       if (event.type === "charge.dispute.created") {
         const dispute = event.data.object;
-        const chargeId = dispute.charge ? String(dispute.charge) : null;
+        const chargeId = dispute.charge
+          ? String(dispute.charge)
+          : null;
 
         if (chargeId) {
           const charge = await stripe.charges.retrieve(chargeId);
-          const pi = charge.payment_intent ? String(charge.payment_intent) : null;
+          const pi = charge.payment_intent
+            ? String(charge.payment_intent)
+            : null;
 
           await updateEntryByPaymentIntent(
             pi,
@@ -178,11 +198,15 @@ export default function stripeWebhookRouter() {
 
       if (event.type === "charge.dispute.closed") {
         const dispute = event.data.object;
-        const chargeId = dispute.charge ? String(dispute.charge) : null;
+        const chargeId = dispute.charge
+          ? String(dispute.charge)
+          : null;
 
         if (chargeId) {
           const charge = await stripe.charges.retrieve(chargeId);
-          const pi = charge.payment_intent ? String(charge.payment_intent) : null;
+          const pi = charge.payment_intent
+            ? String(charge.payment_intent)
+            : null;
 
           const finalStatus =
             dispute.status === "won"
@@ -207,7 +231,7 @@ export default function stripeWebhookRouter() {
 
       return res.json({ received: true });
     } catch {
-      // Always respond 200 so Stripe doesn't repeatedly retry forever on internal errors
+      // Always respond 200 so Stripe doesn't retry infinitely
       return res.json({ received: true });
     }
   });

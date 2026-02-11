@@ -33,8 +33,20 @@ function paymentsNotEnabledMessage() {
   return "Payments are not enabled on this build.";
 }
 
-function checkoutAlreadyStartedMessage() {
-  return "Checkout already started. You can continue checkout or try again later.";
+/**
+ * Stripe statement_descriptor_suffix rules are strict.
+ * Keep it simple: alphanum + spaces, 5–22 chars, must contain at least one letter.
+ */
+function safeDescriptorSuffix(name) {
+  const raw = String(name || "")
+    .replace(/[^a-zA-Z0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 22);
+
+  if (raw.length < 5) return "";
+  if (!/[a-zA-Z]/.test(raw)) return "";
+  return raw;
 }
 
 /* =========================================================
@@ -103,12 +115,13 @@ r.post(
          Rules:
          - Only ONE entry per contest per user
          - Guess immutable once created
-         - If unpaid + expired → allow retry (same guess)
-         - If unpaid + not expired → allow returning the existing checkout URL if we have it
-           otherwise return a neutral message (no scary error)
+         - If unpaid + expired → allow retry (same guess) with a new checkoutAttempt
+         - If unpaid + not expired → RESUME by returning a session url (idempotent create)
       ====================================================== */
 
       const existingSnap = await entryRef.get();
+
+      let checkoutAttempt = 1;
 
       if (existingSnap.exists) {
         const entry = existingSnap.data() || {};
@@ -121,33 +134,33 @@ r.post(
         // Guess immutability
         if (String(entry.guess || "") !== normalizedGuess) {
           return res.status(400).json({
-            error: "An unpaid entry already exists. The number cannot be changed. Please use the same number.",
+            error:
+              "An unpaid entry already exists. The number cannot be changed. Please use the same number.",
           });
         }
 
-        // Expiration check based on lastTouchedAt/ timestamp
+        // Determine attempt + expiration
+        checkoutAttempt = Number(entry.checkoutAttempt || 1);
+
         const touched = Number(entry.lastTouchedAt || entry.retryAt || entry.timestamp || 0);
         const ageMs = now - touched;
         const isExpired = entry.status === "EXPIRED" || ageMs > UNPAID_EXPIRE_MS;
 
-        if (!isExpired) {
-          // If we have a Stripe URL stored, send them back to it
-          // (Most reliable is session id, but URL can be returned only when created;
-          // so we just tell client "resume" and let them hit endpoint again.)
-          // IMPORTANT: do not throw a scary error message
-          return res.status(409).json({
-            error: checkoutAlreadyStartedMessage(),
-            pending: true,
-            contestEndsOn: contest.endsOn || null,
+        if (isExpired) {
+          checkoutAttempt = checkoutAttempt + 1;
+          await entryRef.update({
+            status: "PENDING_PAYMENT",
+            retryAt: now,
+            lastTouchedAt: now,
+            checkoutAttempt,
+          });
+        } else {
+          // Still pending: touch it so it doesn't expire while user is actively trying
+          await entryRef.update({
+            status: "PENDING_PAYMENT",
+            lastTouchedAt: now,
           });
         }
-
-        // Expired unpaid entry → re-activate for retry
-        await entryRef.update({
-          status: "PENDING_PAYMENT",
-          retryAt: now,
-          lastTouchedAt: now,
-        });
       } else {
         // Create new unpaid entry
         await entryRef.create({
@@ -162,19 +175,19 @@ r.post(
           status: "PENDING_PAYMENT",
           stripeSessionId: null,
           paymentIntentId: null,
+          checkoutAttempt: 1,
         });
+        checkoutAttempt = 1;
       }
 
       /* ---------------------------
          Stripe Checkout Session
+         - Use attempt in idempotency key so retries generate a fresh session
+         - Use Stripe-friendly naming on the line item
       ---------------------------- */
-      const idempotencyKey = `checkout_${contest.id}_${req.user.id}`;
+      const idempotencyKey = `checkout_${contest.id}_${req.user.id}_a${checkoutAttempt}`;
 
-      const descriptorSuffix = String(BRAND_NAME || "")
-        .replace(/[^a-zA-Z0-9 ]/g, "")
-        .trim()
-        .slice(0, 22);
-
+      const suffix = safeDescriptorSuffix(BRAND_NAME || "");
       const base = cleanBase(FRONTEND_URL);
 
       const session = await stripe.checkout.sessions.create(
@@ -182,15 +195,15 @@ r.post(
           mode: "payment",
           payment_method_types: ["card"],
 
-          payment_intent_data: descriptorSuffix
-            ? { statement_descriptor_suffix: descriptorSuffix }
+          payment_intent_data: suffix
+            ? { statement_descriptor_suffix: suffix }
             : undefined,
 
           line_items: [
             {
               price_data: {
                 currency: "usd",
-                product_data: { name: "Promotional Entry (Weekly)" },
+                product_data: { name: "Weekly Game Pass (Digital Access)" },
                 unit_amount: 500,
               },
               quantity: 1,
@@ -202,11 +215,13 @@ r.post(
             contestId: contest.id,
             contestEndsOn: contest.endsOn || "",
             guess: normalizedGuess,
+            checkoutAttempt: String(checkoutAttempt),
           },
 
           custom_text: {
             submit: {
-              message: "No purchase necessary. Mail-in AMOE available. One entry per person.",
+              message:
+                "No purchase necessary. Free mail-in entry (AMOE) available. One entry per person per contest.",
             },
           },
 
@@ -231,6 +246,7 @@ r.post(
           userId: req.user.id,
           stripeSessionId: session.id || null,
           guess: normalizedGuess,
+          checkoutAttempt,
         },
         req
       );

@@ -8,11 +8,16 @@ export default function requireUser(req, res, next) {
     const cookies = parseCookies(req);
     const token = cookies[SESSION_COOKIE] || "";
     const sess = readSessionToken(token);
-    if (!sess) return res.status(401).json({ error: "Unauthorized." });
+
+    if (!sess) {
+      res.setHeader("Cache-Control", "no-store");
+      return res.status(401).json({ error: "Unauthorized." });
+    }
 
     req.user = { id: sess.uid };
-    next();
+    return next();
   } catch {
+    res.setHeader("Cache-Control", "no-store");
     return res.status(401).json({ error: "Unauthorized." });
   }
 }

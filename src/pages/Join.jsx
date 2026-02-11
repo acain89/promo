@@ -122,10 +122,33 @@ export default function Join() {
       label=""
       labelClass="join"
       footer={
-        <div className="form" style={{ marginTop: 0 }}>
-          <button className="secondary" onClick={() => nav("/")} disabled={loading || busy}>
-            Back to Landing
-          </button>
+        <div style={{ display: "grid", gap: 10 }}>
+          <div className="form" style={{ marginTop: 0 }}>
+            <button className="secondary" onClick={() => nav("/")} disabled={loading || busy}>
+              Back to Landing
+            </button>
+          </div>
+
+          {/* Compliance surface: keep rules link visible on auth screens */}
+          <div className="fineprint" style={{ opacity: 0.7, textAlign: "center", lineHeight: 1.25 }}>
+            No purchase necessary. Void where prohibited.{" "}
+            <button
+              type="button"
+              className="linkLike"
+              onClick={() => nav("/terms")}
+              disabled={loading || busy}
+              style={{
+                padding: 0,
+                border: "none",
+                background: "transparent",
+                color: "inherit",
+                textDecoration: "underline",
+                cursor: loading || busy ? "default" : "pointer",
+              }}
+            >
+              Official Rules
+            </button>
+          </div>
         </div>
       }
     >

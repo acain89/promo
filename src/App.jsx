@@ -39,6 +39,11 @@ export default function App() {
       <Route path="/terms" element={<Terms />} />
       <Route path="/reveal" element={<Reveal />} />
 
+      {/* Compliance-friendly aliases (same content for now) */}
+      <Route path="/official-rules" element={<Navigate to="/terms" replace />} />
+      <Route path="/rules" element={<Navigate to="/terms" replace />} />
+      <Route path="/privacy" element={<Navigate to="/terms" replace />} />
+
       {/* Admin (separate, desktop-only) */}
       <Route path="/admin" element={<Admin />} />
 

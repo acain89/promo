@@ -277,8 +277,24 @@ export default function Landing() {
               }}
               aria-label="No purchase necessary disclosure"
             >
-              <strong style={{ fontWeight: 900 }}>No purchase necessary.</strong> Mail-in AMOE available. One entry per
-              person per contest.
+              <strong style={{ fontWeight: 900 }}>No purchase necessary.</strong> Free mail-in entry (AMOE) available.
+              One entry per person per contest. Void where prohibited.{" "}
+              <button
+                type="button"
+                className="linkLike"
+                onClick={() => nav("/terms")}
+                disabled={loading}
+                style={{
+                  padding: 0,
+                  border: "none",
+                  background: "transparent",
+                  color: "inherit",
+                  textDecoration: "underline",
+                  cursor: loading ? "default" : "pointer",
+                }}
+              >
+                Official Rules
+              </button>
             </div>
 
             <div className="fineprint" style={{ opacity: 0.35 }}>
@@ -342,12 +358,7 @@ export default function Landing() {
               Past Winners
             </button>
 
-            <button
-              ref={howBtnRef}
-              className="secondary"
-              onClick={() => setHowOpen(true)}
-              disabled={loading}
-            >
+            <button ref={howBtnRef} className="secondary" onClick={() => setHowOpen(true)} disabled={loading}>
               How it works
             </button>
           </div>
@@ -369,7 +380,7 @@ export default function Landing() {
           <ul style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 10, color: "rgba(255,255,255,0.86)" }}>
             <li>Create a profile</li>
             <li>Lock your 3-digit submission</li>
-            <li>Closest to Saturday night’s Pick 3 draw wins the prize</li>
+            <li>After the weekly cutoff, results are posted in Reveal</li>
           </ul>
         </div>
       </Modal>
