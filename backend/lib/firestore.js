@@ -15,17 +15,15 @@ export function initFirestore() {
   if (_db) return _db;
 
   if (!admin.apps.length) {
-    // Support BOTH env naming conventions:
-    // FB_* (what our code expects) OR FIREBASE_* (what you had in Render)
+    // Allow either FB_* or FIREBASE_* env var names
     const projectId = readEnv("FB_PROJECT_ID", "FIREBASE_PROJECT_ID");
     const clientEmail = readEnv("FB_CLIENT_EMAIL", "FIREBASE_CLIENT_EMAIL");
 
-    // Private key: allow raw PEM OR base64
+    // Private key can be provided as raw PEM or base64 PEM (either FB_* or FIREBASE_*)
+    const b64 = readEnv("FB_PRIVATE_KEY_B64", "FIREBASE_PRIVATE_KEY_B64");
     const raw =
-      process.env.FB_PRIVATE_KEY_B64
-        ? Buffer.from(String(process.env.FB_PRIVATE_KEY_B64).trim(), "base64").toString("utf8")
-        : process.env.FIREBASE_PRIVATE_KEY_B64
-        ? Buffer.from(String(process.env.FIREBASE_PRIVATE_KEY_B64).trim(), "base64").toString("utf8")
+      b64
+        ? Buffer.from(b64, "base64").toString("utf8")
         : readEnv("FB_PRIVATE_KEY", "FIREBASE_PRIVATE_KEY");
 
     const privateKey = String(raw || "")
@@ -37,16 +35,17 @@ export function initFirestore() {
 
     if (!projectId || !clientEmail) {
       throw new Error(
-        "FB_PROJECT_ID / FB_CLIENT_EMAIL not found. " +
+        "FB_PROJECT_ID and FB_CLIENT_EMAIL must be configured. " +
           `Got projectId=${projectId ? "set" : "missing"}, clientEmail=${clientEmail ? "set" : "missing"}. ` +
-          "Set FB_PROJECT_ID + FB_CLIENT_EMAIL (or FIREBASE_PROJECT_ID + FIREBASE_CLIENT_EMAIL) on the BACKEND Render service."
+          "Accepted keys: FB_PROJECT_ID/FIREBASE_PROJECT_ID and FB_CLIENT_EMAIL/FIREBASE_CLIENT_EMAIL."
       );
     }
 
     if (!privateKey.includes("BEGIN PRIVATE KEY") || !privateKey.includes("END PRIVATE KEY")) {
       throw new Error(
         "FB private key is not a valid PEM. " +
-          `Got length=${privateKey.length}, startsWith="${privateKey.slice(0, 30)}"...`
+          `Got length=${privateKey.length}, startsWith="${privateKey.slice(0, 30)}"... ` +
+          "Accepted keys: FB_PRIVATE_KEY/FIREBASE_PRIVATE_KEY or FB_PRIVATE_KEY_B64/FIREBASE_PRIVATE_KEY_B64."
       );
     }
 
