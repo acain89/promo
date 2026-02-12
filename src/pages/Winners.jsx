@@ -28,62 +28,37 @@ function safe(v) {
   return s || "—";
 }
 
-/* Visual placeholders until real winners exist */
-const PLACEHOLDERS = [
-  {
-    un: "PlayerOne",
-    submission: "384",
-    target: "392",
-    diff: 8,
-    prizeCents: 60000,
-    submittedAt: Date.now() - 1000 * 60 * 60 * 26,
-  },
-  {
-    un: "NeonWolf",
-    submission: "701",
-    target: "699",
-    diff: 2,
-    prizeCents: 42500,
-    submittedAt: Date.now() - 1000 * 60 * 60 * 50,
-  },
-  {
-    un: "Postman",
-    submission: "112",
-    target: "109",
-    diff: 3,
-    prizeCents: 31000,
-    submittedAt: Date.now() - 1000 * 60 * 60 * 74,
-  },
-];
-
 export default function Winners() {
   const nav = useNavigate();
   const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let alive = true;
+
     (async () => {
       try {
         const r = await apiGet("/api/winners");
+        if (!alive) return;
         setItems(Array.isArray(r) ? r : []);
       } catch {
+        if (!alive) return;
         setItems([]);
+      } finally {
+        if (!alive) return;
+        setLoading(false);
       }
     })();
+
+    return () => {
+      alive = false;
+    };
   }, []);
 
   const rows = useMemo(() => {
-    if (!items.length) {
-      return PLACEHOLDERS.map((p, i) => ({
-        id: `ph-${i}`,
-        placeholder: true,
-        ...p,
-      }));
-    }
-
-    return items.map((w, i) => ({
+    return (items || []).map((w, i) => ({
       id: w.id || `w-${i}`,
-      placeholder: false,
-      un: safe(w.winnerUN || w.winner),
+      un: safe(w.winnerUN || w.winner || w.username),
       submission: safe(w.guess),
       target: safe(w.target),
       diff: w.diff ?? "—",
@@ -105,12 +80,20 @@ export default function Winners() {
       }
     >
       <div className="scrollList">
+        {loading ? (
+          <div className="miniMuted" style={{ textAlign: "center", padding: "10px 0" }}>
+            Loading…
+          </div>
+        ) : null}
+
+        {!loading && !rows.length ? (
+          <div className="miniMuted" style={{ textAlign: "center", padding: "10px 0" }}>
+            No winners posted yet.
+          </div>
+        ) : null}
+
         {rows.map((r) => (
-          <div
-            key={r.id}
-            className="winnerCard"
-            style={{ opacity: r.placeholder ? 0.65 : 1 }}
-          >
+          <div key={r.id} className="winnerCard">
             <div className="winnerUN">{r.un}</div>
             <div className="winnerPrize">{dollarsFromCents(r.prizeCents)}</div>
 
