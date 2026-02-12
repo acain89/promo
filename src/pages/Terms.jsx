@@ -403,7 +403,7 @@ export default function Terms() {
 
         <h2 style={{ margin: "14px 0 8px" }}>26) Contact</h2>
         <p className="miniMuted" style={{ marginBottom: 0 }}>
-          For questions about these Rules, email <strong>acain89@gmail.com</strong> or write to the AMOE mailing
+          For questions about these Rules, email <strong>DrawnFray@gmail.com</strong> or write to the AMOE mailing
           address listed above.
         </p>
 

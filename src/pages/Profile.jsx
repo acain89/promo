@@ -264,6 +264,9 @@ export default function Profile() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const lockBtnRef = useRef(null);
 
+  // ✅ Allow editing guess during pending checkout
+  const [editPending, setEditPending] = useState(false);
+
   const checkoutResult = useMemo(() => {
     try {
       const p = new URLSearchParams(window.location.search);
@@ -312,6 +315,9 @@ export default function Profile() {
 
       const c = await apiGet("/api/contest");
       setContest(c && typeof c === "object" ? c : null);
+
+      // Reset pending-edit UI on refresh
+      setEditPending(false);
 
       // Parallelize the optional calls for faster load
       const [entryRes, passRes] = await Promise.allSettled([
@@ -580,20 +586,68 @@ export default function Profile() {
                   lineHeight: 1.25,
                 }}
               >
-                <div style={{ fontWeight: 900, marginBottom: 6 }}>Checkout in progress</div>
-                <div style={{ marginBottom: 10 }}>
-                  Your entry is recorded only after payment is completed. You can resume checkout or change your guess
-                  and try again.
+                <div style={{ fontWeight: 900, marginBottom: 6 }}>
+                  {editPending ? "Change entry" : "Checkout in progress"}
                 </div>
 
-                <div className="form" style={{ marginTop: 0 }}>
-                  <button className="primary" onClick={() => beginCheckout(true)} disabled={busy}>
-                    Continue to checkout
-                  </button>
-                  <button className="secondary" onClick={refresh} disabled={busy}>
-                    Refresh
-                  </button>
-                </div>
+                {!editPending ? (
+                  <>
+                    <div style={{ marginBottom: 10 }}>
+                      Your entry is recorded only after payment is completed. You can resume checkout or change your
+                      guess and try again.
+                    </div>
+
+                    <div className="form" style={{ marginTop: 0 }}>
+                      <button className="primary" onClick={() => beginCheckout(true)} disabled={busy}>
+                        Continue to checkout
+                      </button>
+
+                      <button
+                        className="secondary"
+                        onClick={() => {
+                          setEditPending(true);
+                          setErr("");
+                          setStatus("");
+                          setGuessRaw(String(myEntry?.guess || ""));
+                        }}
+                        disabled={busy}
+                      >
+                        Change Entry
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ marginBottom: 10 }}>
+                      Enter a new 3-digit number, then continue to checkout.
+                    </div>
+
+                    <div style={{ display: "grid", placeItems: "center", marginBottom: 10 }}>
+                      <DigitBox
+                        value={onlyDigits(guessRaw).slice(0, 3)}
+                        onChange={setGuessRaw}
+                        disabled={busy || !cutoffAt}
+                      />
+                    </div>
+
+                    <div className="form" style={{ marginTop: 0 }}>
+                      <button className="primary" onClick={() => beginCheckout(false)} disabled={busy || !canProceed}>
+                        Continue to checkout
+                      </button>
+
+                      <button
+                        className="secondary"
+                        onClick={() => {
+                          setEditPending(false);
+                          setGuessRaw(String(myEntry?.guess || ""));
+                        }}
+                        disabled={busy}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             )}
 
