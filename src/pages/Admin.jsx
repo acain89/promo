@@ -488,11 +488,14 @@ setErr(errMsg(e, "Paid preview failed."));
   };
 
   const cardStyle = {
-    width: "min(1200px, 96vw)",
-    maxHeight: "92vh",
-    overflow: "hidden",
-    margin: "0 auto",
-  };
+  width: "min(1200px, 96vw)",
+  maxHeight: "92vh",
+  overflowY: "auto",
+  overflowX: "hidden",
+  margin: "0 auto",
+  paddingRight: 6, // prevents scrollbar overlap
+};
+
 
   const twoColStyle = {
     display: "grid",
