@@ -57,7 +57,7 @@ export default function Terms() {
         </p>
         <p className="miniMuted" style={{ marginTop: 0 }}>
           <strong>Sponsor:</strong> drawnfray (site operator) <br />
-          <strong>Contact Email:</strong> support@drawnfray.com <br />
+          <strong>Contact Email:</strong> DrawnFray@gmail.com <br />
           <strong>Mail-in Address:</strong> provided in the “No Purchase Necessary (AMOE)” section below.
         </p>
 

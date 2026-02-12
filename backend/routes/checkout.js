@@ -53,6 +53,7 @@ function safeDescriptorSuffix(name) {
    STRIPE CHECKOUT (PAID ENTRY)
    - If Stripe disabled → NO writes, return 501 cleanly
    - If Stripe enabled → creates/updates entry as PENDING_PAYMENT
+   - ✅ Allow changing guess BEFORE payment
 ========================================================= */
 
 r.post(
@@ -114,30 +115,29 @@ r.post(
 
          Rules:
          - Only ONE entry per contest per user
-         - Guess immutable once created
-         - If unpaid + expired → allow retry (same guess) with a new checkoutAttempt
-         - If unpaid + not expired → RESUME by returning a session url (idempotent create)
+         - ✅ Guess is changeable BEFORE payment
+         - Paid entry is immutable
+         - If unpaid + expired → allow retry
+         - If unpaid + not expired → touch / reuse
+         - Any retry or guess-change increments checkoutAttempt (new session)
       ====================================================== */
 
       const existingSnap = await entryRef.get();
 
       let checkoutAttempt = 1;
+      let prevGuess = null;
+      let guessChanged = false;
 
       if (existingSnap.exists) {
         const entry = existingSnap.data() || {};
+        prevGuess = String(entry.guess || "");
 
         // Already paid → hard stop
         if (entry.paid) {
           return res.status(400).json({ error: "You already entered this contest." });
         }
 
-        // Guess immutability
-        if (String(entry.guess || "") !== normalizedGuess) {
-          return res.status(400).json({
-            error:
-              "An unpaid entry already exists. The number cannot be changed. Please use the same number.",
-          });
-        }
+        guessChanged = prevGuess !== normalizedGuess;
 
         // Determine attempt + expiration
         checkoutAttempt = Number(entry.checkoutAttempt || 1);
@@ -146,16 +146,27 @@ r.post(
         const ageMs = now - touched;
         const isExpired = entry.status === "EXPIRED" || ageMs > UNPAID_EXPIRE_MS;
 
-        if (isExpired) {
+        // If guess changed OR expired → bump attempt and reset pending state
+        if (guessChanged || isExpired) {
           checkoutAttempt = checkoutAttempt + 1;
+
           await entryRef.update({
+            // ✅ allow changing guess before payment
+            guess: normalizedGuess,
+
             status: "PENDING_PAYMENT",
             retryAt: now,
             lastTouchedAt: now,
+
+            // new attempt => new Stripe session
             checkoutAttempt,
+
+            // clear any previous session references (best-effort hygiene)
+            stripeSessionId: null,
+            paymentIntentId: null,
           });
         } else {
-          // Still pending: touch it so it doesn't expire while user is actively trying
+          // Still pending (same guess): touch it so it doesn't expire while user is actively trying
           await entryRef.update({
             status: "PENDING_PAYMENT",
             lastTouchedAt: now,
@@ -183,7 +194,6 @@ r.post(
       /* ---------------------------
          Stripe Checkout Session
          - Use attempt in idempotency key so retries generate a fresh session
-         - Use Stripe-friendly naming on the line item
       ---------------------------- */
       const idempotencyKey = `checkout_${contest.id}_${req.user.id}_a${checkoutAttempt}`;
 
@@ -247,6 +257,8 @@ r.post(
           stripeSessionId: session.id || null,
           guess: normalizedGuess,
           checkoutAttempt,
+          guessChanged,
+          prevGuess,
         },
         req
       );
