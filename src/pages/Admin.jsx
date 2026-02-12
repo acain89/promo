@@ -158,6 +158,12 @@ export default function Admin() {
   const [amoePreview, setAmoePreview] = useState(null);
   const [showAmoePreviewDetails, setShowAmoePreviewDetails] = useState(false);
 
+  // ✅ USER LOOKUP (Paid winner email by UN)
+  const [lookupUN, setLookupUN] = useState("");
+  const [lookupBusy, setLookupBusy] = useState(false);
+  const [lookupErr, setLookupErr] = useState("");
+  const [lookupResult, setLookupResult] = useState(null);
+
   function paidDigits() {
     const mode = String(state?.activeContest?.mode || "PICK3");
     return mode === "DAILY4" ? 4 : 3;
@@ -244,16 +250,25 @@ export default function Admin() {
         setShowPaidPreviewDetails(false);
 
         const d = paidDigits();
-        if (paidTarget.length !== d) throw new Error(`Enter exactly ${d} digits for Paid target.`);
+if (paidTarget.length !== d) throw new Error(`Enter exactly ${d} digits for Paid target.`);
 
-        const r = await apiPost("/api/admin/paid/preview", { targetNumber: paidTarget });
-        setPaidPreview(r);
-        setStatus("Paid preview ready (not posted).");
-      } catch (e) {
-        setErr(errMsg(e, "Paid preview failed."));
-      }
-    });
-  }
+const r = await apiPost("/api/admin/paid/preview", { targetNumber: paidTarget });
+setPaidPreview(r);
+
+// ✅ Autofill lookup box with winner UN (and clear prior lookup result/errors)
+if (r?.winnerUN) {
+  setLookupUN(String(r.winnerUN));
+  setLookupErr("");
+  setLookupResult(null);
+}
+
+setStatus("Paid preview ready (not posted).");
+} catch (e) {
+setErr(errMsg(e, "Paid preview failed."));
+}
+});
+}
+
 
   async function paidPostResults() {
     await withBusy(async () => {
@@ -428,6 +443,27 @@ export default function Admin() {
         setErr(errMsg(e, "Failed to reset AMOE cycle."));
       }
     });
+  }
+
+  // ✅ User lookup action
+  async function lookupUserEmail() {
+    const un = String(lookupUN || "").trim();
+    if (!un || lookupBusy) return;
+
+    try {
+      setLookupBusy(true);
+      setLookupErr("");
+      setLookupResult(null);
+
+      const r = await apiPost("/api/admin/user-lookup", { username: un });
+      if (!r?.ok || !r?.user) throw new Error(r?.error || "User not found.");
+
+      setLookupResult(r.user);
+    } catch (e) {
+      setLookupErr(errMsg(e, "Lookup failed."));
+    } finally {
+      setLookupBusy(false);
+    }
   }
 
   // Derived (safe) UI values
@@ -736,6 +772,62 @@ export default function Admin() {
                         * Paid prize shown is not activated yet (queued not applied).
                       </div>
                     ) : null}
+                  </div>
+
+                  {/* ✅ USER LOOKUP CARD (Paid winners email by UN) */}
+                  <div
+                    style={{
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                      border: "1px solid rgba(255,255,255,0.10)",
+                      background: "rgba(255,255,255,0.01)",
+                    }}
+                  >
+                    <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
+                      User Lookup (Email by UN)
+                    </div>
+
+                    <div style={{ display: "grid", gap: 8 }}>
+                      <input
+                        className="field"
+                        placeholder="Enter UN (username)"
+                        value={lookupUN}
+                        onChange={(e) => setLookupUN(e.target.value)}
+                        disabled={busy || lookupBusy}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") lookupUserEmail();
+                        }}
+                      />
+
+                      <button
+                        className="secondary"
+                        onClick={lookupUserEmail}
+                        disabled={busy || lookupBusy || !String(lookupUN || "").trim()}
+                      >
+                        {lookupBusy ? "Searching…" : "Search"}
+                      </button>
+
+                      {lookupErr ? (
+                        <div style={{ color: "#ffb2b2", fontSize: 13 }}>{lookupErr}</div>
+                      ) : null}
+
+                      {lookupResult ? (
+                        <div style={{ display: "grid", gap: 6 }}>
+                          <div style={compactRow}>
+                            <span className="label">UN</span>
+                            <span className="value">{lookupResult.username || "—"}</span>
+                          </div>
+                          <div style={compactRow}>
+                            <span className="label">Email</span>
+                            <span className="value">{lookupResult.email || "—"}</span>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="miniMuted" style={{ textAlign: "center" }}>
+                          Use this after results post to quickly find the winner’s email.
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>

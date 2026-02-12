@@ -15,6 +15,7 @@ import requireUser from "./middleware/auth.js";
 import publicRoutes from "./routes/public.js";
 import checkoutRoutes from "./routes/checkout.js";
 import adminRoutes from "./routes/admin.js";
+import adminUsers from "./routes/adminUsers.js";
 
 const app = express();
 
@@ -89,6 +90,7 @@ app.use(publicRoutes);
 // - /api/admin/login must be reachable WITHOUT user session
 // - all other admin endpoints enforce requireAdmin inside routes/admin.js
 app.use(adminRoutes);
+app.use(adminUsers);
 
 // Protected (user session required)
 app.use(requireUser, checkoutRoutes);

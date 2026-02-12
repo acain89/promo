@@ -255,7 +255,8 @@ export default function Profile() {
     contestActivatedAt: null,
   });
 
-  const [lastWeek, setLastWeek] = useState(null);
+  // NOTE: lastWeek UI block removed, so we no longer need this state
+  // const [lastWeek, setLastWeek] = useState(null);
 
   const [guessRaw, setGuessRaw] = useState("");
   const guess = useMemo(() => padGuess(guessRaw, 3), [guessRaw]);
@@ -313,10 +314,10 @@ export default function Profile() {
       setContest(c && typeof c === "object" ? c : null);
 
       // Parallelize the optional calls for faster load
-      const [entryRes, passRes, lastWeekRes] = await Promise.allSettled([
+      const [entryRes, passRes] = await Promise.allSettled([
         apiGet("/api/my-entry"),
         apiGet("/api/my-pass"),
-        apiGet("/api/last-week"),
+        // apiGet("/api/last-week"), // removed with UI block
       ]);
 
       // Entry
@@ -350,14 +351,6 @@ export default function Profile() {
       } else {
         setPassSupported(false);
         setPassActive(false);
-      }
-
-      // Last week
-      if (lastWeekRes.status === "fulfilled") {
-        const lw = lastWeekRes.value;
-        setLastWeek(lw?.ok ? lw : null);
-      } else {
-        setLastWeek(null);
       }
 
       // Checkout message (only meaningful when Stripe enabled)
@@ -732,49 +725,7 @@ export default function Profile() {
             </div>
           </div>
 
-          {/* LAST WEEK (optional) */}
-          <div
-            style={{
-              padding: "14px 14px",
-              borderRadius: 14,
-              border: "1px solid rgba(255,255,255,0.10)",
-              background: "rgba(255,255,255,0.01)",
-              textAlign: "left",
-            }}
-          >
-            <div className="label" style={{ marginBottom: 10, textAlign: "center" }}>
-              Last Week
-            </div>
-
-            {lastWeek ? (
-              <div style={{ display: "grid", gap: 8 }}>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span className="label">Week ending</span>
-                  <span className="value">{lastWeek.endsOn || "—"}</span>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span className="label">Your submission</span>
-                  <span className="value">{lastWeek.myGuess ?? "—"}</span>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span className="label">Drawn number</span>
-                  <span className="value">{lastWeek.target ?? "—"}</span>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span className="label">Distance From Target</span>
-                  <span className="value">{lastWeek.dft ?? "—"}</span>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span className="label">Outcome</span>
-                  <span className="value">{lastWeek.outcome || "—"}</span>
-                </div>
-              </div>
-            ) : (
-              <div className="miniMuted" style={{ textAlign: "center" }}>
-                Last week’s summary will appear after results are posted.
-              </div>
-            )}
-          </div>
+          {/* LAST WEEK block removed */}
         </div>
       </PanelShell>
 
