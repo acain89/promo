@@ -5,16 +5,25 @@ import { readSessionToken } from "../lib/session.js";
 
 export default function requireUser(req, res, next) {
   try {
-    const cookies = parseCookies(req);
-    const token = cookies[SESSION_COOKIE] || "";
-    const sess = readSessionToken(token);
+    // Always prevent caching on protected routes
+    res.setHeader("Cache-Control", "no-store");
 
-    if (!sess) {
-      res.setHeader("Cache-Control", "no-store");
+    const cookies = parseCookies(req);
+    const token = String(cookies[SESSION_COOKIE] || "").trim();
+
+    if (!token) {
       return res.status(401).json({ error: "Unauthorized." });
     }
 
-    req.user = { id: sess.uid };
+    const session = readSessionToken(token);
+
+    if (!session || !session.uid) {
+      return res.status(401).json({ error: "Unauthorized." });
+    }
+
+    // Attach user identity to request
+    req.user = { id: session.uid };
+
     return next();
   } catch {
     res.setHeader("Cache-Control", "no-store");

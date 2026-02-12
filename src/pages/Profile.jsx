@@ -27,11 +27,11 @@ const STRIPE_ENABLED = String(import.meta.env.VITE_STRIPE_ENABLED || "")
 function getFocusable(root) {
   if (!root) return [];
   const sel = [
-    'a[href]',
-    'button:not([disabled])',
-    'input:not([disabled])',
-    'select:not([disabled])',
-    'textarea:not([disabled])',
+    "a[href]",
+    "button:not([disabled])",
+    "input:not([disabled])",
+    "select:not([disabled])",
+    "textarea:not([disabled])",
     '[tabindex]:not([tabindex="-1"])',
   ].join(",");
   return Array.from(root.querySelectorAll(sel)).filter((el) => {
@@ -250,7 +250,10 @@ export default function Profile() {
   const [passSupported, setPassSupported] = useState(false);
 
   const [myEntry, setMyEntry] = useState(null);
-  const [myEntryMeta, setMyEntryMeta] = useState({ contestId: null, contestActivatedAt: null });
+  const [myEntryMeta, setMyEntryMeta] = useState({
+    contestId: null,
+    contestActivatedAt: null,
+  });
 
   const [lastWeek, setLastWeek] = useState(null);
 
@@ -391,7 +394,8 @@ export default function Profile() {
     !!cutoffAt &&
     onlyDigits(guessRaw).length === 3;
 
-  const isQueued = locked && !!myEntry?.paid && String(myEntry?.status || "").toUpperCase() === "QUEUED";
+  const isQueued =
+    locked && !!myEntry?.paid && String(myEntry?.status || "").toUpperCase() === "QUEUED";
   const contestNotActivated = locked && !activatedAt;
 
   async function doLogout() {
@@ -428,7 +432,7 @@ export default function Profile() {
       setStatus("");
       setBusy(true);
 
-      const clean = padGuess(useExistingGuess ? (myEntry?.guess ?? guessRaw) : guessRaw, 3);
+      const clean = padGuess(useExistingGuess ? myEntry?.guess ?? guessRaw : guessRaw, 3);
       if (onlyDigits(clean).length !== 3) throw new Error("Enter a 3-digit number.");
 
       const r = await apiPost("/api/checkout", { guess: clean });
@@ -489,23 +493,43 @@ export default function Profile() {
           {status ? <div className="fineprint">{status}</div> : null}
 
           {!loading && me && (
-            <div style={{ display: "grid", gap: 10, textAlign: "center", marginTop: 2 }}>
-              <div style={{ display: "grid", gap: 4 }}>
+            <>
+              {/* Top Bar (compact) */}
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 8,
+                  marginBottom: 8,
+                }}
+              >
+                <button
+                  className="secondary"
+                  style={{ padding: "6px 10px", fontSize: "0.8rem" }}
+                  onClick={() => nav("/")}
+                  disabled={busy}
+                >
+                  Home
+                </button>
+
+                <button
+                  className="secondary"
+                  style={{ padding: "6px 10px", fontSize: "0.8rem" }}
+                  onClick={doLogout}
+                  disabled={busy}
+                >
+                  Log out
+                </button>
+              </div>
+
+              {/* User Info */}
+              <div style={{ display: "grid", gap: 4, textAlign: "center" }}>
                 <div style={{ fontSize: "1.35rem", fontWeight: 900, letterSpacing: "0.02em" }}>
                   {me.username}
                 </div>
                 <div className="miniMuted">{me.email || ""}</div>
               </div>
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                <button className="secondary" onClick={() => nav("/")} disabled={busy}>
-                  Home
-                </button>
-                <button className="secondary" onClick={doLogout} disabled={busy}>
-                  Log out
-                </button>
-              </div>
-            </div>
+            </>
           )}
 
           {/* THIS WEEK */}
@@ -565,8 +589,8 @@ export default function Profile() {
               >
                 <div style={{ fontWeight: 900, marginBottom: 6 }}>Checkout in progress</div>
                 <div style={{ marginBottom: 10 }}>
-                  Your entry is recorded only after payment is completed. You can resume checkout or change your guess and
-                  try again.
+                  Your entry is recorded only after payment is completed. You can resume checkout or change your guess
+                  and try again.
                 </div>
 
                 <div className="form" style={{ marginTop: 0 }}>
@@ -634,8 +658,8 @@ export default function Profile() {
                   >
                     <div style={{ fontWeight: 900, marginBottom: 6 }}>Queued for next week</div>
                     <div>
-                      Entries submitted after cutoff are saved immediately, but the prize display updates after the Sunday
-                      reset.
+                      Entries submitted after cutoff are saved immediately, but the prize display updates after the
+                      Sunday reset.
                     </div>
                   </div>
                 ) : null}

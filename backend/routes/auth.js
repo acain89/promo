@@ -42,7 +42,7 @@ r.get("/api/me", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
 
   const cookies = req.cookies || parseCookies(req);
-  const token = cookies[SESSION_COOKIE] || "";
+  const token = String(cookies[SESSION_COOKIE] || "").trim();
   const sess = readSessionToken(token);
   if (!sess) return res.status(401).json({ error: "Unauthorized." });
 
@@ -63,9 +63,10 @@ r.post(
   async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
 
-    const username = cleanUsername(req.body?.username);
+    // Support both {username,email,password} and legacy {un,email,pw}
+    const username = cleanUsername(req.body?.username ?? req.body?.un);
     const email = cleanEmail(req.body?.email);
-    const password = String(req.body?.password || "");
+    const password = String(req.body?.password ?? req.body?.pw ?? "");
 
     if (!username || !email || !password) {
       return res.status(400).json({ error: "Missing fields." });
@@ -117,7 +118,11 @@ r.post(
 );
 
 /** Frontend expects POST /api/auth/login
- * Frontend sends: { username, password }
+ * Accepts username OR email.
+ * Supports payloads:
+ *  - { username, password }
+ *  - { un, pw }  (legacy)
+ *  - { email, password }
  */
 r.post(
   "/api/auth/login",
@@ -125,23 +130,37 @@ r.post(
   async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
 
-    const username = cleanUsername(req.body?.username);
-    const password = String(req.body?.password || "");
+    const identifierRaw = String(
+      req.body?.username ?? req.body?.un ?? req.body?.email ?? ""
+    ).trim();
+    const password = String(req.body?.password ?? req.body?.pw ?? "");
 
-    if (!username || !password) return res.status(400).json({ error: "Missing fields." });
+    if (!identifierRaw || !password) {
+      return res.status(400).json({ error: "Missing fields." });
+    }
 
-    const snap = await db()
-      .collection("users")
-      .where("usernameLower", "==", username.toLowerCase())
-      .limit(1)
-      .get();
+    const isEmail = identifierRaw.includes("@");
+    const identifier = isEmail ? cleanEmail(identifierRaw) : cleanUsername(identifierRaw);
+
+    // If it's not an email, enforce username format
+    if (!isEmail && !okUsername(identifier)) {
+      return res.status(401).json({ error: "Invalid credentials." });
+    }
+
+    const q = db().collection("users");
+    const snap = isEmail
+      ? await q.where("email", "==", identifier).limit(1).get()
+      : await q.where("usernameLower", "==", identifier.toLowerCase()).limit(1).get();
 
     if (snap.empty) return res.status(401).json({ error: "Invalid credentials." });
 
     const doc = snap.docs[0];
     const u = doc.data() || {};
 
-    const ok = await bcrypt.compare(password, String(u.pwHash || ""));
+    // Support older field name if it ever existed
+    const hash = String(u.pwHash || u.passwordHash || "");
+
+    const ok = await bcrypt.compare(password, hash);
     if (!ok) return res.status(401).json({ error: "Invalid credentials." });
 
     const token = makeSessionToken({
@@ -170,7 +189,7 @@ r.post("/api/auth/logout", async (req, res) => {
 /* =========================================================
    PASSWORD RESET
    - Join.jsx calls POST /api/auth/forgot
-   - Reset.jsx likely calls POST /api/auth/reset
+   - Reset.jsx calls POST /api/auth/reset with { token, newPassword }
 ========================================================= */
 
 /** POST /api/auth/forgot { email } -> always returns ok (no enumeration) */
@@ -181,7 +200,9 @@ r.post(
     res.setHeader("Cache-Control", "no-store");
 
     const email = cleanEmail(req.body?.email);
-    if (!email || !email.includes("@")) return res.status(400).json({ error: "Enter a valid email." });
+    if (!email || !email.includes("@")) {
+      return res.status(400).json({ error: "Enter a valid email." });
+    }
 
     // Do not reveal whether account exists
     try {
@@ -195,18 +216,16 @@ r.post(
           exp: nowMs() + RESET_TTL_MS,
         });
 
-        // Store only a hash/marker server-side so token can be invalidated
         await db().collection("passwordResets").doc(userId).set(
           {
             createdAt: nowMs(),
             exp: nowMs() + RESET_TTL_MS,
-            tokenHint: token.slice(0, 12), // minimal marker for support/debug
+            tokenHint: token.slice(0, 12),
             usedAt: null,
           },
           { merge: true }
         );
 
-        // TODO: send email (provider). For now, log via audit only.
         await auditLog("auth_forgot_issued", { userId }, req);
       }
     } catch {
@@ -217,7 +236,11 @@ r.post(
   }
 );
 
-/** POST /api/auth/reset { token, password } */
+/** POST /api/auth/reset
+ * Accepts:
+ *  - { token, newPassword }  (frontend Reset.jsx)
+ *  - { token, password }     (legacy)
+ */
 r.post(
   "/api/auth/reset",
   rateLimit({ routeKey: "reset", limit: 20, windowMs: 15 * 60 * 1000 }),
@@ -225,7 +248,7 @@ r.post(
     res.setHeader("Cache-Control", "no-store");
 
     const token = String(req.body?.token || "").trim();
-    const password = String(req.body?.password || "");
+    const password = String(req.body?.newPassword ?? req.body?.password ?? "");
 
     if (!token) return res.status(400).json({ error: "Missing token." });
     if (!okPassword(password)) {
@@ -256,7 +279,7 @@ r.post(
 
     await auditLog("auth_reset_success", { userId }, req);
 
-    // Optional: log them in after reset
+    // Log them in after reset
     const sessToken = makeSessionToken({
       uid: userId,
       exp: nowMs() + SESSION_TTL_MS,
