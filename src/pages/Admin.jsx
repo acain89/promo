@@ -148,6 +148,12 @@ export default function Admin() {
   const [paidPreview, setPaidPreview] = useState(null);
   const [showPaidPreviewDetails, setShowPaidPreviewDetails] = useState(false);
 
+  // ✅ PAID — POOL CONTRIBUTION CONFIG (per paid entry)
+  const [poolUsdRaw, setPoolUsdRaw] = useState(""); // dollars typed, e.g. "4.55"
+  const [poolDirty, setPoolDirty] = useState(false);
+  const [poolBusy, setPoolBusy] = useState(false);
+  const [poolErr, setPoolErr] = useState("");
+
   // AMOE
   const [amoeName, setAmoeName] = useState("");
   const [amoeEmail, setAmoeEmail] = useState("");
@@ -175,6 +181,18 @@ export default function Admin() {
 
   const totalPaidCents = Number(state?.stats?.totalPaidCents || 0);
 
+  // ✅ Pool config values from backend state
+  const poolCfgCents = Number(state?.config?.poolContributionCents);
+  const hasPoolCfg = Number.isFinite(poolCfgCents) && poolCfgCents >= 0;
+
+  const activeLockedFromState = Number(state?.config?.activePoolContributionCentsLocked);
+  const activeLockedCents =
+    Number.isFinite(activeLockedFromState) && activeLockedFromState >= 0
+      ? Math.floor(activeLockedFromState)
+      : Number.isFinite(Number(active?.poolContributionCentsLocked)) && Number(active?.poolContributionCentsLocked) >= 0
+        ? Math.floor(Number(active?.poolContributionCentsLocked))
+        : null;
+
   // Important: preview/resolve use the *last* contest (same as backend default).
   function paidDigits() {
     const mode = String(last?.mode || active?.mode || "PICK3").toUpperCase();
@@ -196,6 +214,14 @@ export default function Admin() {
     if (!Number.isFinite(n) || n < 0) return null;
     return Math.round(n * 100);
   }
+
+  // ✅ keep the pool USD input synced from backend, unless user is actively editing
+  useEffect(() => {
+    if (!unlocked) return;
+    if (!hasPoolCfg) return;
+    if (poolDirty) return;
+    setPoolUsdRaw(String((poolCfgCents / 100).toFixed(2)));
+  }, [unlocked, hasPoolCfg, poolCfgCents, poolDirty]);
 
   async function adminLoginSubmit(code) {
     const attempt = String(code || "").trim();
@@ -257,6 +283,39 @@ export default function Admin() {
         await refresh();
       } catch (e) {
         setErr(errMsg(e, "Failed to set mode."));
+      }
+    });
+  }
+
+  // ✅ Save pool contribution (per paid entry)
+  async function savePoolContribution() {
+    const cents = dollarsToCents(poolUsdRaw);
+    if (cents == null || poolBusy) return;
+
+    await withBusy(async () => {
+      try {
+        setPoolBusy(true);
+        setPoolErr("");
+        setStatus("");
+        setErr("");
+
+        const confirmText =
+          `Update prize pool contribution per paid entry?\n\n` +
+          `New default: ${dollarsFromCents(cents)}\n\n` +
+          `Note: If the active contest is locked, this applies to future contests only.\n` +
+          `Proceed?`;
+
+        if (!window.confirm(confirmText)) return;
+
+        await apiPost("/api/admin/pool-config/set", { poolContributionCents: cents });
+
+        setPoolDirty(false);
+        setStatus(`Pool contribution set to ${dollarsFromCents(cents)} (default).`);
+        await refresh();
+      } catch (e) {
+        setPoolErr(errMsg(e, "Failed to update pool contribution."));
+      } finally {
+        setPoolBusy(false);
       }
     });
   }
@@ -715,6 +774,71 @@ export default function Admin() {
                 </button>
               </div>
 
+              {/* ✅ POOL CONTRIBUTION CONFIG CARD */}
+              <div
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "1px solid rgba(255,255,255,0.10)",
+                  background: "rgba(255,255,255,0.01)",
+                }}
+              >
+                <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
+                  Prize Pool Contribution (Per Paid Entry)
+                </div>
+
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={compactRow}>
+                    <span className="label">Default (Config)</span>
+                    <span className="value">{hasPoolCfg ? dollarsFromCents(poolCfgCents) : "—"}</span>
+                  </div>
+
+                  <div style={compactRow}>
+                    <span className="label">Active Locked</span>
+                    <span className="value">{activeLockedCents != null ? dollarsFromCents(activeLockedCents) : "—"}</span>
+                  </div>
+
+                  <div className="miniMuted" style={{ textAlign: "center" }}>
+                    Change the default anytime. If “Active Locked” is set, changes apply to future contests only.
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, marginTop: 6 }}>
+                    <input
+                      className="field"
+                      inputMode="decimal"
+                      placeholder="e.g. 4.55"
+                      value={poolUsdRaw}
+                      onChange={(e) => {
+                        setPoolUsdRaw(e.target.value);
+                        setPoolDirty(true);
+                        setPoolErr("");
+                      }}
+                      disabled={busy || poolBusy}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") savePoolContribution();
+                      }}
+                    />
+
+                    <button
+                      className="secondary"
+                      onClick={savePoolContribution}
+                      disabled={busy || poolBusy || dollarsToCents(poolUsdRaw) == null}
+                      style={{ padding: "10px 12px" }}
+                    >
+                      {poolBusy ? "Saving…" : "Save"}
+                    </button>
+                  </div>
+
+                  {!poolDirty && hasPoolCfg ? (
+                    <div className="miniMuted" style={{ textAlign: "center" }}>
+                      Tip: type a new value (USD), then Save.
+                    </div>
+                  ) : null}
+
+                  {poolErr ? <div style={{ color: "#ffb2b2", fontSize: 13, textAlign: "center" }}>{poolErr}</div> : null}
+                </div>
+              </div>
+
               <div
                 style={{
                   padding: "10px 12px",
@@ -860,7 +984,7 @@ export default function Admin() {
                         <input
                           className="field"
                           inputMode="decimal"
-                          placeholder='Add amount (USD) e.g. 600'
+                          placeholder="Add amount (USD) e.g. 600"
                           value={addPaidRaw}
                           onChange={(e) => setAddPaidRaw(e.target.value)}
                           disabled={busy || totalPaidBusy}
@@ -882,7 +1006,7 @@ export default function Admin() {
                         <input
                           className="field"
                           inputMode="decimal"
-                          placeholder='Set absolute total (USD) e.g. 1200'
+                          placeholder="Set absolute total (USD) e.g. 1200"
                           value={setPaidRaw}
                           onChange={(e) => setSetPaidRaw(e.target.value)}
                           disabled={busy || totalPaidBusy}
@@ -960,7 +1084,8 @@ export default function Admin() {
                         <div style={compactRow}>
                           <span className="label">Queued (Paid)</span>
                           <span className="value">
-                            {Number(state?.paid?.queuedCount || 0)} • {dollarsFromCents(Number(state?.paid?.queuedPrizeCents || 0))}
+                            {Number(state?.paid?.queuedCount || 0)} •{" "}
+                            {dollarsFromCents(Number(state?.paid?.queuedPrizeCents || 0))}
                           </span>
                         </div>
                       </div>
@@ -1089,7 +1214,11 @@ export default function Admin() {
                   disabled={busy}
                 />
 
-                <button className="primary" onClick={amoeAdd} disabled={busy || amoeStatus !== "COLLECTING" || amoeGuess.length !== 3}>
+                <button
+                  className="primary"
+                  onClick={amoeAdd}
+                  disabled={busy || amoeStatus !== "COLLECTING" || amoeGuess.length !== 3}
+                >
                   Add AMOE Entry
                 </button>
               </div>
@@ -1110,10 +1239,18 @@ export default function Admin() {
                 />
 
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  <button className="secondary" onClick={amoeDoPreview} disabled={busy || amoeStatus !== "READY" || amoeTarget.length !== 3}>
+                  <button
+                    className="secondary"
+                    onClick={amoeDoPreview}
+                    disabled={busy || amoeStatus !== "READY" || amoeTarget.length !== 3}
+                  >
                     Preview AMOE Winner
                   </button>
-                  <button className="primary" onClick={amoeResolve} disabled={busy || amoeStatus !== "READY" || amoeTarget.length !== 3}>
+                  <button
+                    className="primary"
+                    onClick={amoeResolve}
+                    disabled={busy || amoeStatus !== "READY" || amoeTarget.length !== 3}
+                  >
                     Post AMOE Results (Irreversible)
                   </button>
                 </div>
