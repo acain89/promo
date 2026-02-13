@@ -473,14 +473,17 @@ export default function Landing() {
           </button>
         }
       >
-        <div style={{ textAlign: "left" }}>
-          <ul style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 10, color: "rgba(255,255,255,0.86)" }}>
-            <li>Create a profile</li>
-            <li>Lock your 3-digit submission</li>
-            <li>After the weekly cutoff, results are posted in Reveal</li>
-          </ul>
-        </div>
-      </Modal>
+       <div style={{ textAlign: "left" }}>
+  <ul style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 10, color: "rgba(255,255,255,0.86)" }}>
+    <li>Secure your 3-digit number before the weekly cutoff.</li>
+    <li>The prize pool grows with every entry and locks at cutoff.</li>
+    <li>Saturday night’s Pick 3 drawing sets the official target number.</li>
+    <li>The closest entry wins the cash prize.</li>
+    <li>All results are published in Reveal when the timer expires.</li>
+  </ul>
+</div>
+</Modal>
+
 
       <Modal
         open={loginToRevealOpen}

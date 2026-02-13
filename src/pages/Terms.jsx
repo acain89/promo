@@ -252,29 +252,33 @@ export default function Terms() {
           contest or AMOE drawing) and the distribution of selected numbers. Sponsor does not guarantee any odds.
         </p>
 
-        <h2 style={{ margin: "14px 0 8px" }}>12) Prize, Prize Display, and Limits</h2>
-        <ul className="miniMuted" style={{ marginTop: 0 }}>
-          <li>
-            <strong>Paid weekly contest prize:</strong> the prize amount for a weekly contest period is displayed on the
-            website. For each paid entry received for that weekly contest period, <strong>$3.55</strong> is added to the
-            prize amount (before any caps, rollover policies, or promotional bonuses that may be disclosed for that
-            period).
-          </li>
-          <li>
-            The prize shown at the paid weekly Cutoff is the prize awarded for that paid weekly contest period, unless
-            otherwise stated. Sponsor’s systems lock the prize amount at Cutoff for that weekly contest period.
-          </li>
-          <li>
-            <strong>AMOE drawing prize:</strong> the AMOE prize amount is calculated using the same formula as the paid
-            weekly contest, based on <strong>five hundred (500) paid-entry equivalents at $3.55 per entry</strong>, and is
-            disclosed prior to AMOE winner determination.
-          </li>
-          <li>
-            Sponsor may establish maximum prize caps, rollover policies, or promotional bonuses and will disclose such
-            rules on the website for the applicable promotion.
-          </li>
-          <li>Prizes are non-transferable. No substitution except at Sponsor’s discretion where required for compliance.</li>
-        </ul>
+       <h2 style={{ margin: "14px 0 8px" }}>12) Prize, Prize Display, and Limits</h2>
+<ul className="miniMuted" style={{ marginTop: 0 }}>
+  <li>
+    <strong>Paid weekly contest prize:</strong> the prize amount for a weekly contest period is displayed on the
+    website. For each paid entry received for that weekly contest period, <strong>$4.55</strong> is currently added to the
+    prize amount (before any caps, rollover policies, or promotional bonuses that may be disclosed for that
+    period). The per-entry contribution amount may be adjusted for future contest periods and will be disclosed
+    on the website prior to the start of the applicable contest.
+  </li>
+  <li>
+    The prize shown at the paid weekly Cutoff is the prize awarded for that paid weekly contest period, unless
+    otherwise stated. Sponsor’s systems lock the prize amount at Cutoff for that weekly contest period.
+  </li>
+  <li>
+    <strong>AMOE drawing prize:</strong> the AMOE prize amount is calculated using the same formula as the paid
+    weekly contest, based on <strong>five hundred (500) paid-entry equivalents at the per-entry contribution amount in effect for that contest period</strong>, and is
+    disclosed prior to AMOE winner determination.
+  </li>
+  <li>
+    Sponsor may establish maximum prize caps, rollover policies, or promotional bonuses and will disclose such
+    rules on the website for the applicable promotion.
+  </li>
+  <li>
+    Prizes are non-transferable. No substitution except at Sponsor’s discretion where required for compliance.
+  </li>
+</ul>
+
 
         <h2 style={{ margin: "14px 0 8px" }}>13) Taxes / Reporting</h2>
         <p className="miniMuted">
