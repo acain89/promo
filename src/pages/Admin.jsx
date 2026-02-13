@@ -143,7 +143,7 @@ export default function Admin() {
   const [loginOpen, setLoginOpen] = useState(false);
   const [loginBusy, setLoginBusy] = useState(false);
 
-  // PAID
+  // PAID (RESOLVE/PREVIEW operates on LAST contest by design)
   const [paidTargetRaw, setPaidTargetRaw] = useState("");
   const [paidPreview, setPaidPreview] = useState(null);
   const [showPaidPreviewDetails, setShowPaidPreviewDetails] = useState(false);
@@ -158,24 +158,44 @@ export default function Admin() {
   const [amoePreview, setAmoePreview] = useState(null);
   const [showAmoePreviewDetails, setShowAmoePreviewDetails] = useState(false);
 
-  // ✅ USER LOOKUP (Paid winner email by UN)
+  // USER LOOKUP (Paid winner email by UN)
   const [lookupUN, setLookupUN] = useState("");
   const [lookupBusy, setLookupBusy] = useState(false);
   const [lookupErr, setLookupErr] = useState("");
   const [lookupResult, setLookupResult] = useState(null);
 
+  // ✅ LIFETIME "TOTAL PAID OUT" (MANUAL)
+  const [totalPaidBusy, setTotalPaidBusy] = useState(false);
+  const [totalPaidErr, setTotalPaidErr] = useState("");
+  const [addPaidRaw, setAddPaidRaw] = useState(""); // dollars typed, e.g. "600"
+  const [setPaidRaw, setSetPaidRaw] = useState(""); // dollars typed for absolute set
+
+  const active = state?.activeContest || null;
+  const last = state?.lastContest || null;
+
+  const totalPaidCents = Number(state?.stats?.totalPaidCents || 0);
+
+  // Important: preview/resolve use the *last* contest (same as backend default).
   function paidDigits() {
-    const mode = String(state?.activeContest?.mode || "PICK3");
+    const mode = String(last?.mode || active?.mode || "PICK3").toUpperCase();
     return mode === "DAILY4" ? 4 : 3;
   }
 
   const paidTarget = useMemo(() => {
     const d = paidDigits();
     return onlyDigits(paidTargetRaw).slice(0, d);
-  }, [paidTargetRaw, state]);
+  }, [paidTargetRaw, last?.mode, active?.mode]);
 
   const amoeGuess = useMemo(() => onlyDigits(amoeGuessRaw).slice(0, 3), [amoeGuessRaw]);
   const amoeTarget = useMemo(() => onlyDigits(amoeTargetRaw).slice(0, 3), [amoeTargetRaw]);
+
+  function dollarsToCents(raw) {
+    const s = String(raw ?? "").trim();
+    if (!s) return null;
+    const n = Number(s);
+    if (!Number.isFinite(n) || n < 0) return null;
+    return Math.round(n * 100);
+  }
 
   async function adminLoginSubmit(code) {
     const attempt = String(code || "").trim();
@@ -250,25 +270,27 @@ export default function Admin() {
         setShowPaidPreviewDetails(false);
 
         const d = paidDigits();
-if (paidTarget.length !== d) throw new Error(`Enter exactly ${d} digits for Paid target.`);
+        if (paidTarget.length !== d) throw new Error(`Enter exactly ${d} digits for Paid target.`);
 
-const r = await apiPost("/api/admin/paid/preview", { targetNumber: paidTarget });
-setPaidPreview(r);
+        const contestId = String(last?.id || "").trim();
+        const body = contestId ? { targetNumber: paidTarget, contestId } : { targetNumber: paidTarget };
 
-// ✅ Autofill lookup box with winner UN (and clear prior lookup result/errors)
-if (r?.winnerUN) {
-  setLookupUN(String(r.winnerUN));
-  setLookupErr("");
-  setLookupResult(null);
-}
+        const r = await apiPost("/api/admin/paid/preview", body);
+        setPaidPreview(r);
 
-setStatus("Paid preview ready (not posted).");
-} catch (e) {
-setErr(errMsg(e, "Paid preview failed."));
-}
-});
-}
+        // Autofill lookup box with winner UN (and clear prior lookup result/errors)
+        if (r?.winnerUN) {
+          setLookupUN(String(r.winnerUN));
+          setLookupErr("");
+          setLookupResult(null);
+        }
 
+        setStatus("Paid preview ready (not posted).");
+      } catch (e) {
+        setErr(errMsg(e, "Paid preview failed."));
+      }
+    });
+  }
 
   async function paidPostResults() {
     await withBusy(async () => {
@@ -279,15 +301,19 @@ setErr(errMsg(e, "Paid preview failed."));
         const d = paidDigits();
         if (paidTarget.length !== d) throw new Error(`Enter exactly ${d} digits for Paid target.`);
 
+        const contestId = String(last?.id || "").trim();
+
         const confirmText =
           `POST PAID RESULTS as ${paidTarget}?\n\n` +
+          `Contest: ${contestId || "(auto)"}\n` +
           `This action is IRREVERSIBLE.\n` +
           `Winner: Closest DFT, then earliest timestamp.\n\n` +
           `Proceed?`;
 
         if (!window.confirm(confirmText)) return;
 
-        await apiPost("/api/admin/resolve", { targetNumber: paidTarget });
+        const body = contestId ? { targetNumber: paidTarget, contestId } : { targetNumber: paidTarget };
+        await apiPost("/api/admin/resolve", body);
 
         setStatus("Paid results posted.");
         setPaidPreview(null);
@@ -306,8 +332,8 @@ setErr(errMsg(e, "Paid preview failed."));
         setErr("");
 
         const confirmText =
-          `ACTIVATE upcoming paid contest?\n\n` +
-          `This will make queued paid entries visible (entryCount + prize) for the active contest.\n` +
+          `ACTIVATE current paid contest?\n\n` +
+          `This will apply queued paid entries to the ACTIVE contest (entryCount + prize).\n` +
           `Proceed?`;
 
         if (!window.confirm(confirmText)) return;
@@ -445,7 +471,7 @@ setErr(errMsg(e, "Paid preview failed."));
     });
   }
 
-  // ✅ User lookup action
+  // User lookup action
   async function lookupUserEmail() {
     const un = String(lookupUN || "").trim();
     if (!un || lookupBusy) return;
@@ -466,13 +492,78 @@ setErr(errMsg(e, "Paid preview failed."));
     }
   }
 
-  // Derived (safe) UI values
-  const active = state?.activeContest || null;
-  const paidActivated = !!active?.activatedAt;
-  const paidMode = String(active?.mode || "PICK3");
+  // ✅ Total paid out actions (manual)
+  async function totalPaidAdd() {
+    const addCents = dollarsToCents(addPaidRaw);
+    if (addCents == null || totalPaidBusy) return;
 
-  // Disable “post” when last contest is already resolved (backend also blocks)
-  const paidResolved = !!state?.lastContest?.resolved;
+    await withBusy(async () => {
+      try {
+        setTotalPaidBusy(true);
+        setTotalPaidErr("");
+        setStatus("");
+        setErr("");
+
+        const confirmText =
+          `ADD to Lifetime Paid Out?\n\n` +
+          `Add: ${dollarsFromCents(addCents)}\n` +
+          `This should match a payout you actually completed.\n\n` +
+          `Proceed?`;
+
+        if (!window.confirm(confirmText)) return;
+
+        await apiPost("/api/admin/stats/total-paid/add", { addCents });
+        setAddPaidRaw("");
+        setStatus(`Lifetime Paid Out updated (+${dollarsFromCents(addCents)}).`);
+        await refresh();
+      } catch (e) {
+        setTotalPaidErr(errMsg(e, "Failed to update total paid."));
+      } finally {
+        setTotalPaidBusy(false);
+      }
+    });
+  }
+
+  async function totalPaidSetAbsolute() {
+    const totalCents = dollarsToCents(setPaidRaw);
+    if (totalCents == null || totalPaidBusy) return;
+
+    await withBusy(async () => {
+      try {
+        setTotalPaidBusy(true);
+        setTotalPaidErr("");
+        setStatus("");
+        setErr("");
+
+        const confirmText =
+          `SET Lifetime Paid Out (ABSOLUTE)?\n\n` +
+          `New value: ${dollarsFromCents(totalCents)}\n\n` +
+          `Only use this to correct mistakes.\n` +
+          `Type OK to proceed.`;
+
+        const ok = window.prompt(confirmText);
+        if (String(ok || "").trim().toUpperCase() !== "OK") return;
+
+        await apiPost("/api/admin/stats/total-paid/set", { totalPaidCents: totalCents });
+        setSetPaidRaw("");
+        setStatus(`Lifetime Paid Out set to ${dollarsFromCents(totalCents)}.`);
+        await refresh();
+      } catch (e) {
+        setTotalPaidErr(errMsg(e, "Failed to set total paid."));
+      } finally {
+        setTotalPaidBusy(false);
+      }
+    });
+  }
+
+  // Derived (safe) UI values
+  const paidActivated = !!active?.activatedAt;
+  const paidMode = String(active?.mode || "PICK3").toUpperCase();
+
+  // Post/preview target should be for the LAST contest (the one you’re resolving).
+  const resolveContestId = String(last?.id || "").trim();
+  const resolveMode = String(last?.mode || "PICK3").toUpperCase();
+  const resolveResolved = !!last?.resolved;
 
   const amoe = state?.amoe || null;
   const amoeStatus = String(amoe?.status || "COLLECTING");
@@ -488,14 +579,13 @@ setErr(errMsg(e, "Paid preview failed."));
   };
 
   const cardStyle = {
-  width: "min(1200px, 96vw)",
-  maxHeight: "92vh",
-  overflowY: "auto",
-  overflowX: "hidden",
-  margin: "0 auto",
-  paddingRight: 6, // prevents scrollbar overlap
-};
-
+    width: "min(1200px, 96vw)",
+    maxHeight: "92vh",
+    overflowY: "auto",
+    overflowX: "hidden",
+    margin: "0 auto",
+    paddingRight: 6, // prevents scrollbar overlap
+  };
 
   const twoColStyle = {
     display: "grid",
@@ -612,7 +702,7 @@ setErr(errMsg(e, "Paid preview failed."));
 
             <div style={{ display: "grid", gap: 8 }}>
               <div style={compactRow}>
-                <span className="label">Mode</span>
+                <span className="label">Active Mode</span>
                 <span className="value">{paidMode}</span>
               </div>
 
@@ -623,6 +713,37 @@ setErr(errMsg(e, "Paid preview failed."));
                 <button className="secondary" onClick={() => setContestMode("DAILY4")} disabled={busy}>
                   Set Mode: DAILY4 (Hidden)
                 </button>
+              </div>
+
+              <div
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "1px solid rgba(255,255,255,0.10)",
+                  background: "rgba(255,255,255,0.01)",
+                }}
+              >
+                <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
+                  Resolve Target Applies To (Last Contest)
+                </div>
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={compactRow}>
+                    <span className="label">Contest ID</span>
+                    <span className="value">{resolveContestId || "—"}</span>
+                  </div>
+                  <div style={compactRow}>
+                    <span className="label">Mode</span>
+                    <span className="value">{resolveMode}</span>
+                  </div>
+                  <div style={compactRow}>
+                    <span className="label">Ends On</span>
+                    <span className="value">{last?.endsOn || "—"}</span>
+                  </div>
+                  <div style={compactRow}>
+                    <span className="label">Resolved</span>
+                    <span className="value">{resolveResolved ? "YES" : "NO"}</span>
+                  </div>
+                </div>
               </div>
 
               <div style={{ display: "grid", gap: 6 }}>
@@ -646,7 +767,7 @@ setErr(errMsg(e, "Paid preview failed."));
                   <button
                     className="primary"
                     onClick={paidPostResults}
-                    disabled={busy || paidTarget.length !== paidDigits() || paidResolved}
+                    disabled={busy || paidTarget.length !== paidDigits() || resolveResolved}
                   >
                     Post Paid Results (Irreversible)
                   </button>
@@ -701,6 +822,10 @@ setErr(errMsg(e, "Paid preview failed."));
                             <span className="label">Timestamp</span>
                             <span className="value">{formatTS(paidPreview.entryTimestamp)}</span>
                           </div>
+                          <div style={compactRow}>
+                            <span className="label">Prize</span>
+                            <span className="value">{dollarsFromCents(paidPreview.prizeCents || 0)}</span>
+                          </div>
                         </>
                       ) : null}
                     </div>
@@ -708,6 +833,78 @@ setErr(errMsg(e, "Paid preview failed."));
                 ) : null}
 
                 <div style={{ display: "grid", gap: 8 }}>
+                  {/* ✅ LIFETIME PAID OUT (MANUAL) */}
+                  <div
+                    style={{
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                      border: "1px solid rgba(255,255,255,0.10)",
+                      background: "rgba(255,255,255,0.01)",
+                    }}
+                  >
+                    <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
+                      Lifetime Paid Out (Manual)
+                    </div>
+
+                    <div style={{ display: "grid", gap: 6 }}>
+                      <div style={compactRow}>
+                        <span className="label">Current Total</span>
+                        <span className="value">{dollarsFromCents(totalPaidCents)}</span>
+                      </div>
+
+                      <div className="miniMuted" style={{ textAlign: "center" }}>
+                        Update this after you actually pay winners via your 3rd-party processor.
+                      </div>
+
+                      <div style={{ display: "grid", gap: 8, marginTop: 6 }}>
+                        <input
+                          className="field"
+                          inputMode="decimal"
+                          placeholder='Add amount (USD) e.g. 600'
+                          value={addPaidRaw}
+                          onChange={(e) => setAddPaidRaw(e.target.value)}
+                          disabled={busy || totalPaidBusy}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") totalPaidAdd();
+                          }}
+                        />
+
+                        <button
+                          className="secondary"
+                          onClick={totalPaidAdd}
+                          disabled={busy || totalPaidBusy || dollarsToCents(addPaidRaw) == null}
+                        >
+                          {totalPaidBusy ? "Updating…" : "Add to Total Paid Out"}
+                        </button>
+
+                        <div style={{ height: 1, background: "rgba(255,255,255,0.08)" }} />
+
+                        <input
+                          className="field"
+                          inputMode="decimal"
+                          placeholder='Set absolute total (USD) e.g. 1200'
+                          value={setPaidRaw}
+                          onChange={(e) => setSetPaidRaw(e.target.value)}
+                          disabled={busy || totalPaidBusy}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") totalPaidSetAbsolute();
+                          }}
+                        />
+
+                        <button
+                          className="secondary"
+                          onClick={totalPaidSetAbsolute}
+                          style={{ borderColor: "rgba(201,75,75,0.45)" }}
+                          disabled={busy || totalPaidBusy || dollarsToCents(setPaidRaw) == null}
+                        >
+                          {totalPaidBusy ? "Updating…" : "Set Total Paid Out (Danger)"}
+                        </button>
+
+                        {totalPaidErr ? <div style={{ color: "#ffb2b2", fontSize: 13 }}>{totalPaidErr}</div> : null}
+                      </div>
+                    </div>
+                  </div>
+
                   <button
                     className="secondary"
                     onClick={paidActivateSunday}
@@ -730,7 +927,7 @@ setErr(errMsg(e, "Paid preview failed."));
                     }}
                   >
                     <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
-                      Operational Snapshot
+                      Operational Snapshot (Active)
                     </div>
 
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
@@ -763,8 +960,7 @@ setErr(errMsg(e, "Paid preview failed."));
                         <div style={compactRow}>
                           <span className="label">Queued (Paid)</span>
                           <span className="value">
-                            {Number(state?.paid?.queuedCount || 0)} •{" "}
-                            {dollarsFromCents(Number(state?.paid?.queuedPrizeCents || 0))}
+                            {Number(state?.paid?.queuedCount || 0)} • {dollarsFromCents(Number(state?.paid?.queuedPrizeCents || 0))}
                           </span>
                         </div>
                       </div>
@@ -777,7 +973,7 @@ setErr(errMsg(e, "Paid preview failed."));
                     ) : null}
                   </div>
 
-                  {/* ✅ USER LOOKUP CARD (Paid winners email by UN) */}
+                  {/* USER LOOKUP CARD (Paid winners email by UN) */}
                   <div
                     style={{
                       padding: "10px 12px",
@@ -810,9 +1006,7 @@ setErr(errMsg(e, "Paid preview failed."));
                         {lookupBusy ? "Searching…" : "Search"}
                       </button>
 
-                      {lookupErr ? (
-                        <div style={{ color: "#ffb2b2", fontSize: 13 }}>{lookupErr}</div>
-                      ) : null}
+                      {lookupErr ? <div style={{ color: "#ffb2b2", fontSize: 13 }}>{lookupErr}</div> : null}
 
                       {lookupResult ? (
                         <div style={{ display: "grid", gap: 6 }}>
@@ -864,9 +1058,27 @@ setErr(errMsg(e, "Paid preview failed."));
                   Add AMOE Entry (Manual)
                 </div>
 
-                <input className="field" placeholder="Full legal name" value={amoeName} onChange={(e) => setAmoeName(e.target.value)} disabled={busy} />
-                <input className="field" placeholder="Email" value={amoeEmail} onChange={(e) => setAmoeEmail(e.target.value)} disabled={busy} />
-                <input className="field" placeholder="Mailing address" value={amoeAddress} onChange={(e) => setAmoeAddress(e.target.value)} disabled={busy} />
+                <input
+                  className="field"
+                  placeholder="Full legal name"
+                  value={amoeName}
+                  onChange={(e) => setAmoeName(e.target.value)}
+                  disabled={busy}
+                />
+                <input
+                  className="field"
+                  placeholder="Email"
+                  value={amoeEmail}
+                  onChange={(e) => setAmoeEmail(e.target.value)}
+                  disabled={busy}
+                />
+                <input
+                  className="field"
+                  placeholder="Mailing address"
+                  value={amoeAddress}
+                  onChange={(e) => setAmoeAddress(e.target.value)}
+                  disabled={busy}
+                />
                 <input
                   className="field"
                   type="text"
@@ -877,11 +1089,7 @@ setErr(errMsg(e, "Paid preview failed."));
                   disabled={busy}
                 />
 
-                <button
-                  className="primary"
-                  onClick={amoeAdd}
-                  disabled={busy || amoeStatus !== "COLLECTING" || amoeGuess.length !== 3}
-                >
+                <button className="primary" onClick={amoeAdd} disabled={busy || amoeStatus !== "COLLECTING" || amoeGuess.length !== 3}>
                   Add AMOE Entry
                 </button>
               </div>
@@ -902,18 +1110,10 @@ setErr(errMsg(e, "Paid preview failed."));
                 />
 
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  <button
-                    className="secondary"
-                    onClick={amoeDoPreview}
-                    disabled={busy || amoeStatus !== "READY" || amoeTarget.length !== 3}
-                  >
+                  <button className="secondary" onClick={amoeDoPreview} disabled={busy || amoeStatus !== "READY" || amoeTarget.length !== 3}>
                     Preview AMOE Winner
                   </button>
-                  <button
-                    className="primary"
-                    onClick={amoeResolve}
-                    disabled={busy || amoeStatus !== "READY" || amoeTarget.length !== 3}
-                  >
+                  <button className="primary" onClick={amoeResolve} disabled={busy || amoeStatus !== "READY" || amoeTarget.length !== 3}>
                     Post AMOE Results (Irreversible)
                   </button>
                 </div>

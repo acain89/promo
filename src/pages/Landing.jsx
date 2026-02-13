@@ -53,7 +53,6 @@ function Modal({ open, title, children, onClose, actions, initialFocusRef }) {
 
     const prevActive = document.activeElement;
 
-    // focus first focusable (or preferred)
     const focusFirst = () => {
       const preferred = initialFocusRef?.current;
       if (preferred && typeof preferred.focus === "function") {
@@ -64,7 +63,6 @@ function Modal({ open, title, children, onClose, actions, initialFocusRef }) {
       if (focusables[0]) focusables[0].focus();
     };
 
-    // defer until after paint
     const raf = requestAnimationFrame(focusFirst);
 
     const onKeyDown = (e) => {
@@ -105,14 +103,12 @@ function Modal({ open, title, children, onClose, actions, initialFocusRef }) {
       cancelAnimationFrame(raf);
       document.removeEventListener("keydown", onKeyDown);
 
-      // restore focus to where the user was
       if (prevActive && typeof prevActive.focus === "function") {
         prevActive.focus();
       }
     };
   }, [open, onClose, initialFocusRef]);
 
-  // lock background scroll while modal open
   useEffect(() => {
     if (!open) return;
     const prev = document.body.style.overflow;
@@ -207,41 +203,76 @@ export default function Landing() {
   const [howOpen, setHowOpen] = useState(false);
   const [loginToRevealOpen, setLoginToRevealOpen] = useState(false);
 
-  // refs to restore focus after close
   const howBtnRef = useRef(null);
   const revealBtnRef = useRef(null);
+
+  const mountedRef = useRef(false);
+  const pollRef = useRef(null);
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now() + serverDelta), 1000);
     return () => clearInterval(t);
   }, [serverDelta]);
 
-  async function refresh() {
+  async function refreshContest({ silent = false } = {}) {
     try {
-      setErr("");
-      setLoading(true);
+      if (!silent) {
+        setErr("");
+        setLoading(true);
+      }
 
       const c = await apiGet("/api/contest");
       if (c?.serverNow) setServerDelta(c.serverNow - Date.now());
       if (c?.ok) setContest(c);
       else setContest(null);
 
+      // auth check can be less frequent, but keeping it here is fine & cheap
       try {
         const m = await authMe();
         setAuthed(!!m?.ok);
       } catch {
         setAuthed(false);
       }
+
+      if (!silent) setErr("");
     } catch {
-      setContest(null);
-      setErr("Failed to load contest state.");
+      if (!silent) {
+        setContest(null);
+        setErr("Failed to load contest state.");
+      }
+      // silent refresh failures should not nuke the UI
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }
 
   useEffect(() => {
-    refresh();
+    mountedRef.current = true;
+
+    // Initial load (shows loading state)
+    refreshContest({ silent: false }).finally(() => {
+      // After initial load, start polling silently
+      if (!mountedRef.current) return;
+
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(() => {
+        if (document.visibilityState !== "visible") return;
+        refreshContest({ silent: true });
+      }, 10000); // 10s poll keeps it "live" without hammering
+    });
+
+    const onVis = () => {
+      if (document.visibilityState === "visible") {
+        refreshContest({ silent: true });
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+
+    return () => {
+      mountedRef.current = false;
+      document.removeEventListener("visibilitychange", onVis);
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -260,6 +291,14 @@ export default function Landing() {
     }
     nav("/reveal");
   }
+
+  const playerCountText =
+    contest?.playerCount == null ? "—" : Number(contest.playerCount || 0).toLocaleString("en-US");
+
+  const totalPaidText = useMemo(
+    () => dollarsFromCents(contest?.totalPaidCents || 0),
+    [contest?.totalPaidCents]
+  );
 
   return (
     <>
@@ -346,6 +385,64 @@ export default function Landing() {
           >
             Reveal
           </button>
+
+          {/* Live player count + total paid out */}
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+              gap: 10,
+              marginTop: 2,
+            }}
+          >
+            <div
+              style={{
+                borderRadius: 12,
+                padding: "10px 12px",
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid rgba(255,255,255,0.08)",
+                minHeight: 54,
+                display: "grid",
+                alignContent: "center",
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 10,
+                  letterSpacing: "0.16em",
+                  textTransform: "uppercase",
+                  opacity: 0.7,
+                }}
+              >
+                Players this round
+              </div>
+              <div style={{ fontSize: 16, fontWeight: 900, marginTop: 2 }}>{playerCountText}</div>
+            </div>
+
+            <div
+              style={{
+                borderRadius: 12,
+                padding: "10px 12px",
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid rgba(255,255,255,0.08)",
+                minHeight: 54,
+                display: "grid",
+                alignContent: "center",
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 10,
+                  letterSpacing: "0.16em",
+                  textTransform: "uppercase",
+                  opacity: 0.7,
+                }}
+              >
+                Total paid out
+              </div>
+              <div style={{ fontSize: 16, fontWeight: 900, marginTop: 2 }}>{totalPaidText}</div>
+            </div>
+          </div>
 
           {err ? <div className="error">{err}</div> : null}
 

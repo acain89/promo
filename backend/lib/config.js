@@ -1,7 +1,7 @@
 // backend/lib/config.js
 import crypto from "crypto";
 
-export const PORT = process.env.PORT || 3001;
+export const PORT = Number(process.env.PORT || 3001);
 
 export const FRONTEND_URL = String(process.env.FRONTEND_URL || "").trim();
 export const NODE_ENV = String(process.env.NODE_ENV || "development").trim();
@@ -26,8 +26,10 @@ export const TOKEN_TTL_SECONDS = 30 * 60;
 // Timezone + cutoff rules
 export const CHICAGO_TZ = "America/Chicago";
 export const CUTOFF_WEEKDAY_SHORT = "Sat";
-export const CUTOFF_HOUR_24 = Number(process.env.CUTOFF_HOUR_24 ?? 21);
-export const CUTOFF_MINUTE = Number(process.env.CUTOFF_MINUTE ?? 30);
+
+// Clamp cutoff inputs to avoid bad env values causing weird behavior
+export const CUTOFF_HOUR_24 = Math.max(0, Math.min(23, Number(process.env.CUTOFF_HOUR_24 ?? 21)));
+export const CUTOFF_MINUTE = Math.max(0, Math.min(59, Number(process.env.CUTOFF_MINUTE ?? 30)));
 
 // Unpaid entry expiration
 export const UNPAID_EXPIRE_MS = Number(process.env.UNPAID_EXPIRE_MS ?? 2 * 60 * 60 * 1000);
@@ -61,8 +63,7 @@ function addWithWwwVariants(set, url) {
 
   set.add(u);
 
-  // If it's an https origin, add/remove www variant automatically.
-  // This prevents "works on drawnfray.com but not www.drawnfray.com" issues.
+  // If it's an https/http origin, add/remove www variant automatically.
   try {
     const parsed = new URL(u);
     if (parsed.protocol === "https:" || parsed.protocol === "http:") {
@@ -121,7 +122,7 @@ if (NODE_ENV === "production") {
   if (!FRONTEND_URL) missing.push("FRONTEND_URL");
 
   if (missing.length) {
-  throw new Error(`Missing required production env vars: ${missing.join(", ")}`);
+    throw new Error(`Missing required production env vars: ${missing.join(", ")}`);
   }
 }
 

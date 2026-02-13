@@ -17,12 +17,7 @@ import {
   MODES,
 } from "../lib/config.js";
 
-import {
-  onlyDigits,
-  normalizeNumber,
-  absDiff,
-  nowMs,
-} from "../lib/utils.js";
+import { onlyDigits, normalizeNumber, absDiff, nowMs } from "../lib/utils.js";
 
 import {
   ensureActiveContestNow,
@@ -37,6 +32,8 @@ const r = Router();
 /* =========================================================
    HELPERS
 ========================================================= */
+
+const DEFAULT_POOL_CONTRIB_CENTS = 355;
 
 async function getPaidContestByIdOrLast(contestIdMaybe) {
   let id = String(contestIdMaybe || "").trim();
@@ -55,7 +52,101 @@ function isPaidEntryEligible(e) {
   if (!e.paid) return false;
   const s = String(e.status || "").toUpperCase();
   if (s === "REFUNDED" || s === "DISPUTED" || s === "EXPIRED") return false;
+  // IMPORTANT: queued entries are not applied to the contest prize/entryCount until activated
+  if (s === "QUEUED") return false;
   return true;
+}
+
+// ✅ For activation, QUEUED entries MUST count (they become applied to the contest).
+function isPaidEntryEligibleForActivation(e) {
+  if (!e) return false;
+  if (!e.paid) return false;
+  const s = String(e.status || "").toUpperCase();
+  if (s === "REFUNDED" || s === "DISPUTED" || s === "EXPIRED") return false;
+  // Count both PAID and QUEUED as "paid entries" when activating
+  return true;
+}
+
+function clampInt(n, lo, hi) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return null;
+  const i = Math.floor(v);
+  if (i < lo) return lo;
+  if (i > hi) return hi;
+  return i;
+}
+
+async function getPoolContributionCents() {
+  try {
+    const snap = await db().collection("config").doc("public").get();
+    if (!snap.exists) return DEFAULT_POOL_CONTRIB_CENTS;
+    const d = snap.data() || {};
+    const v = Number(d.poolContributionCents);
+    if (!Number.isFinite(v) || v < 0) return DEFAULT_POOL_CONTRIB_CENTS;
+    return Math.floor(v);
+  } catch {
+    return DEFAULT_POOL_CONTRIB_CENTS;
+  }
+}
+
+async function setPoolContributionCents(cents) {
+  const v = clampInt(cents, 0, 5000); // allow up to $50.00 just in case
+  if (v == null) throw new Error("Invalid pool contribution.");
+  await db().collection("config").doc("public").set(
+    {
+      poolContributionCents: v,
+      updatedAt: nowMs(),
+    },
+    { merge: true }
+  );
+  return v;
+}
+
+/* =========================================================
+   STATS — LIFETIME "TOTAL PAID OUT" (MANUAL)
+   NOTE: This is NOT tied to Stripe. You update it after you
+   complete payout via your 3rd-party processor.
+========================================================= */
+
+const TOTAL_PAID_CAP_CENTS = 10_000_000_00; // $10,000,000.00
+
+async function getTotalPaidCents() {
+  try {
+    const snap = await db().collection("stats").doc("global").get();
+    if (!snap.exists) return 0;
+    const d = snap.data() || {};
+    const v = Number(d.totalPaidCents || 0);
+    return Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function addToTotalPaidCents(addCents) {
+  const inc = clampInt(addCents, 0, TOTAL_PAID_CAP_CENTS);
+  if (inc == null) throw new Error("Invalid addCents.");
+  if (!inc) return await getTotalPaidCents();
+
+  const ref = db().collection("stats").doc("global");
+  await db().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const cur = snap.exists ? Number((snap.data() || {}).totalPaidCents || 0) : 0;
+    const base = Number.isFinite(cur) && cur >= 0 ? Math.floor(cur) : 0;
+    const next = Math.min(TOTAL_PAID_CAP_CENTS, base + inc);
+    tx.set(ref, { totalPaidCents: next, updatedAt: nowMs() }, { merge: true });
+  });
+
+  return await getTotalPaidCents();
+}
+
+async function setTotalPaidCentsAbsolute(totalCents) {
+  const v = clampInt(totalCents, 0, TOTAL_PAID_CAP_CENTS);
+  if (v == null) throw new Error("Invalid totalPaidCents.");
+
+  const ref = db().collection("stats").doc("global");
+  await ref.set({ totalPaidCents: v, updatedAt: nowMs() }, { merge: true });
+
+  return v;
 }
 
 /* =========================================================
@@ -91,6 +182,149 @@ r.post(
 );
 
 /* =========================================================
+   ADMIN — STATS (LIFETIME PAID OUT)
+========================================================= */
+
+r.post(
+  "/api/admin/stats/get",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_stats_get", limit: 60, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const totalPaidCents = await getTotalPaidCents();
+      return res.json({ ok: true, totalPaidCents });
+    } catch (e) {
+      return res.status(500).json({ error: e.message || "Failed to load stats." });
+    }
+  }
+);
+
+r.post(
+  "/api/admin/stats/total-paid/add",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_total_paid_add", limit: 30, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const { addCents } = req.body || {};
+      const inc = clampInt(addCents, 0, TOTAL_PAID_CAP_CENTS);
+      if (inc == null) throw new Error("Invalid addCents.");
+
+      const next = await addToTotalPaidCents(inc);
+
+      await auditLog("admin_total_paid_add", { addCents: inc, totalPaidCents: next }, req);
+
+      return res.json({ ok: true, totalPaidCents: next });
+    } catch (e) {
+      return res.status(400).json({ error: e.message || "Failed to update total paid." });
+    }
+  }
+);
+
+r.post(
+  "/api/admin/stats/total-paid/set",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_total_paid_set", limit: 10, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const { totalPaidCents } = req.body || {};
+      const v = await setTotalPaidCentsAbsolute(totalPaidCents);
+
+      await auditLog("admin_total_paid_set", { totalPaidCents: v }, req);
+
+      return res.json({ ok: true, totalPaidCents: v });
+    } catch (e) {
+      return res.status(400).json({ error: e.message || "Failed to set total paid." });
+    }
+  }
+);
+
+/* =========================================================
+   ADMIN — CONFIG: POOL CONTRIBUTION (PRICE CUT)
+========================================================= */
+
+r.post(
+  "/api/admin/pool-config/get",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_pool_get", limit: 60, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const poolContributionCents = await getPoolContributionCents();
+      return res.json({ ok: true, poolContributionCents });
+    } catch (e) {
+      return res.status(500).json({ error: e.message || "Failed to load pool config." });
+    }
+  }
+);
+
+r.post(
+  "/api/admin/pool-config/set",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_pool_set", limit: 30, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const { poolContributionCents } = req.body || {};
+      const v = await setPoolContributionCents(poolContributionCents);
+
+      await auditLog("admin_pool_config_set", { poolContributionCents: v }, req);
+
+      return res.json({ ok: true, poolContributionCents: v });
+    } catch (e) {
+      return res.status(400).json({ error: e.message || "Failed to set pool config." });
+    }
+  }
+);
+
+/* =========================================================
+   ADMIN — USER LOOKUP (EMAIL BY USERNAME)
+   Used by Admin.jsx -> POST /api/admin/user-lookup { username }
+========================================================= */
+
+function cleanUsername(s) {
+  return String(s || "").trim();
+}
+function okUsername(un) {
+  // keep consistent with auth.js: 2–24 chars, letters/numbers/_ only
+  return /^[a-zA-Z0-9_]{2,24}$/.test(un);
+}
+
+r.post(
+  "/api/admin/user-lookup",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_user_lookup", limit: 120, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const username = cleanUsername(req.body?.username);
+      if (!username || !okUsername(username)) {
+        return res.status(400).json({ ok: false, error: "Invalid username." });
+      }
+
+      const unLower = username.toLowerCase();
+
+      const snap = await db().collection("users").where("usernameLower", "==", unLower).limit(1).get();
+      if (snap.empty) {
+        await auditLog("admin_user_lookup", { ok: false, usernameLower: unLower }, req);
+        return res.status(404).json({ ok: false, error: "User not found." });
+      }
+
+      const doc = snap.docs[0];
+      const u = doc.data() || {};
+
+      const user = {
+        id: doc.id,
+        username: u.username || username,
+        email: u.email || null,
+      };
+
+      await auditLog("admin_user_lookup", { ok: true, userId: doc.id, usernameLower: unLower }, req);
+
+      return res.json({ ok: true, user });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: e.message || "Lookup failed." });
+    }
+  }
+);
+
+/* =========================================================
    ADMIN — COMBINED STATE (PAID + AMOE)
 ========================================================= */
 
@@ -113,7 +347,13 @@ r.post(
 
       const { state: amoeState } = await getOrInitAmoeState();
 
-      // queued for active contest (paid but not activated at payment time)
+      const poolContributionCents = await getPoolContributionCents();
+      const activeLocked = Number(active.poolContributionCentsLocked);
+      const activeContrib =
+        Number.isFinite(activeLocked) && activeLocked >= 0 ? Math.floor(activeLocked) : poolContributionCents;
+
+      const totalPaidCents = await getTotalPaidCents();
+
       let queuedCount = 0;
       let queuedPrizeCents = 0;
 
@@ -122,13 +362,24 @@ r.post(
         const e = d.data();
         if (e && e.paid && String(e.status || "").toUpperCase() === "QUEUED") {
           queuedCount += 1;
-          queuedPrizeCents += 355;
+          queuedPrizeCents += activeContrib;
         }
       });
 
       return res.json({
         ok: true,
         serverNow: nowMs(),
+
+        stats: {
+          totalPaidCents,
+        },
+
+        config: {
+          poolContributionCents,
+          activePoolContributionCentsLocked:
+            Number.isFinite(activeLocked) && activeLocked >= 0 ? Math.floor(activeLocked) : null,
+        },
+
         activeContest: {
           ok: true,
           serverNow: nowMs(),
@@ -142,7 +393,10 @@ r.post(
           entryCount: Number(active.entryCount || 0),
           prizeCents: Number(active.prizeCents || 0),
           activatedAt: active.activatedAt ?? null,
+          poolContributionCentsLocked:
+            Number.isFinite(activeLocked) && activeLocked >= 0 ? Math.floor(activeLocked) : null,
         },
+
         lastContest: lastContest
           ? {
               id: lastContest.id || lastId,
@@ -155,12 +409,19 @@ r.post(
               entryCount: Number(lastContest.entryCount || 0),
               prizeCents: Number(lastContest.prizeCents || 0),
               activatedAt: lastContest.activatedAt ?? null,
+              poolContributionCentsLocked:
+                Number.isFinite(Number(lastContest.poolContributionCentsLocked)) &&
+                Number(lastContest.poolContributionCentsLocked) >= 0
+                  ? Math.floor(Number(lastContest.poolContributionCentsLocked))
+                  : null,
             }
           : null,
+
         paid: {
           queuedCount,
           queuedPrizeCents,
         },
+
         amoe: {
           cycleId: amoeState.cycleId ?? 1,
           status: amoeState.status || "COLLECTING",
@@ -323,7 +584,6 @@ r.post(
 
       await db().collection("winners").add(record);
 
-      // cap history
       const winnersSnap = await db().collection("winners").orderBy("resolvedAt", "desc").get();
       const batch = db().batch();
       winnersSnap.docs.slice(HISTORY_LIMIT).forEach((d) => batch.delete(d.ref));
@@ -354,7 +614,7 @@ r.post(
   rateLimit({ routeKey: "admin_paid_activate", limit: 20, windowMs: 15 * 60 * 1000 }),
   async (req, res) => {
     try {
-      const contest = await ensureActiveContestNow(); // the active/current contest period
+      const contest = await ensureActiveContestNow();
       const contestRef = db().collection("contests").doc(contest.id);
       const snap = await contestRef.get();
       if (!snap.exists) return res.status(400).json({ error: "Contest missing." });
@@ -366,18 +626,25 @@ r.post(
         return res.json({ ok: true, contestId: contest.id, activatedAt: c.activatedAt });
       }
 
+      const cfgCents = await getPoolContributionCents();
+      const lockedExisting = Number(c.poolContributionCentsLocked);
+      const lockCents =
+        Number.isFinite(lockedExisting) && lockedExisting >= 0 ? Math.floor(lockedExisting) : Math.floor(cfgCents);
+
       const entriesSnap = await db().collection("entries").doc(contest.id).collection("items").get();
       let paidCount = 0;
 
+      // ✅ Count both QUEUED and PAID entries (excluding refunded/disputed/expired)
       entriesSnap.forEach((d) => {
         const e = d.data();
-        if (e && e.paid && isPaidEntryEligible(e)) paidCount += 1;
+        if (e && isPaidEntryEligibleForActivation(e)) paidCount += 1;
       });
 
       const patch = {
         activatedAt: nowMs(),
         entryCount: paidCount,
-        prizeCents: paidCount * 355,
+        prizeCents: paidCount * lockCents,
+        poolContributionCentsLocked: lockCents,
       };
 
       await contestRef.set(patch, { merge: true });
@@ -392,7 +659,11 @@ r.post(
       });
       await batch.commit();
 
-      await auditLog("admin_paid_activate", { contestId: contest.id, paidCount }, req);
+      await auditLog(
+        "admin_paid_activate",
+        { contestId: contest.id, paidCount, poolContributionCentsLocked: lockCents },
+        req
+      );
 
       return res.json({
         ok: true,
@@ -400,6 +671,7 @@ r.post(
         activatedAt: patch.activatedAt,
         entryCount: paidCount,
         prizeCents: patch.prizeCents,
+        poolContributionCentsLocked: lockCents,
       });
     } catch (e) {
       return res.status(500).json({ error: e.message || "Failed to activate contest." });
@@ -426,6 +698,8 @@ r.post(
         return res.status(400).json({ error: "Cannot reset an active contest with entries." });
       }
 
+      const cfgCents = await getPoolContributionCents();
+
       await db().collection("contests").doc(contest.id).set(
         {
           id: contest.id,
@@ -439,11 +713,13 @@ r.post(
           prizeCents: 0,
           activatedAt: null,
           resetAt: nowMs(),
+
+          poolContributionCentsLocked: Math.floor(cfgCents),
         },
         { merge: true }
       );
 
-      await auditLog("admin_reset", { contestId: contest.id }, req);
+      await auditLog("admin_reset", { contestId: contest.id, poolContributionCentsLocked: Math.floor(cfgCents) }, req);
 
       return res.json({ ok: true, contestId: contest.id });
     } catch (e) {
@@ -490,7 +766,8 @@ r.post(
       const { ref: stateRef, state } = await getOrInitAmoeState();
 
       const status = String(state.status || "COLLECTING");
-      if (status === "RESOLVED") return res.status(400).json({ error: "AMOE cycle is resolved. Reset cycle to start again." });
+      if (status === "RESOLVED")
+        return res.status(400).json({ error: "AMOE cycle is resolved. Reset cycle to start again." });
       if (status === "READY") return res.status(400).json({ error: "AMOE is ready to resolve. Do not add more entries." });
 
       const cycleId = Number(state.cycleId || 1);
@@ -732,6 +1009,7 @@ r.post(
           targetNumber: contest.targetNumber ?? null,
           entryCount: Number(contest.entryCount || 0),
           prizeCents: Number(contest.prizeCents || 0),
+          poolContributionCentsLocked: contest.poolContributionCentsLocked ?? null,
         },
         winner,
         entriesCountTotal: entries.length,

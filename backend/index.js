@@ -33,31 +33,66 @@ app.use((req, res, next) => {
 });
 
 /* =========================================================
-   CORS
+   NO-CACHE FOR LIVE STATE ENDPOINTS
+========================================================= */
+const NO_CACHE_PATHS = new Set([
+  "/api/contest",
+  "/api/reveal-state",
+  "/api/winners",
+  "/api/amoe/winners",
+  "/api/round-summary",
+  "/api/my-entry",
+]);
+
+app.use((req, res, next) => {
+  if (req.method === "GET" && NO_CACHE_PATHS.has(req.path)) {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+  }
+
+  // helps caches handle CORS responses correctly
+  res.setHeader("Vary", "Origin");
+
+  next();
+});
+
+/* =========================================================
+   CORS (cookies + Authorization for Admin)
 ========================================================= */
 function normalizeOrigin(o) {
   return String(o || "").trim().replace(/\/+$/, "");
 }
 
-const allowed = ALLOWED_ORIGINS.map(normalizeOrigin);
+const allowed = (Array.isArray(ALLOWED_ORIGINS) ? ALLOWED_ORIGINS : [])
+  .map(normalizeOrigin)
+  .filter(Boolean);
 
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      // allow non-browser clients / same-origin / server-to-server (Stripe webhooks won't use CORS anyway)
-      if (!origin) return cb(null, true);
+const corsOptions = {
+  origin: (origin, cb) => {
+    // allow non-browser clients / same-origin / server-to-server
+    if (!origin) return cb(null, true);
 
-      const o = normalizeOrigin(origin);
-      if (allowed.includes(o)) return cb(null, true);
+    const o = normalizeOrigin(origin);
+    if (allowed.includes(o)) return cb(null, true);
 
-      return cb(new Error("Not allowed by CORS"));
-    },
-    credentials: true,
-  })
-);
+    return cb(new Error("Not allowed by CORS"));
+  },
+  credentials: true,
 
-// Make preflights reliable (esp. with cookies)
-app.options("*", cors());
+  // Make preflight explicit and reliable for Admin bearer token + JSON
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+
+  // (Optional) If you ever need the frontend to read a custom header, add it here:
+  exposedHeaders: [],
+
+  optionsSuccessStatus: 204,
+  maxAge: 86400,
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 
 /* =========================================================
    FIRESTORE INIT
@@ -73,11 +108,10 @@ app.use(healthRoutes);
 
 // Stripe webhook MUST be mounted before express.json()
 // NOTE: stripeWebhookRoutes() already uses express.raw() internally.
-// Do NOT wrap it with express.raw() again here.
 app.use("/api/stripe/webhook", stripeWebhookRoutes());
 
 // JSON + cookies for everything else
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 app.use(cookieParser());
 
 // Auth endpoints
@@ -86,9 +120,7 @@ app.use(authRoutes);
 // Public
 app.use(publicRoutes);
 
-// Admin routes:
-// - /api/admin/login must be reachable WITHOUT user session
-// - all other admin endpoints enforce requireAdmin inside routes/admin.js
+// Admin routes (admin.js enforces requireAdmin internally except /api/admin/login)
 app.use(adminRoutes);
 app.use(adminUsers);
 
@@ -124,5 +156,5 @@ app.listen(PORT, async () => {
 
   console.log(`Backend running on port ${PORT}`);
   console.log(`env=${NODE_ENV}`);
-  console.log(`Allowed origins: ${ALLOWED_ORIGINS.join(", ")}`);
+  console.log(`Allowed origins: ${(ALLOWED_ORIGINS || []).join(", ")}`);
 });

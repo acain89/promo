@@ -18,6 +18,14 @@ function buildUrl(path) {
   return `${API_BASE}${p.startsWith("/") ? "" : "/"}${p}`;
 }
 
+function withCacheBust(url) {
+  // Only needed for GET, but safe even if called elsewhere (we will only call for GET).
+  // Helps defeat any proxy/CDN/browser cache weirdness.
+  const u = new URL(url, window.location.origin);
+  u.searchParams.set("__ts", String(Date.now()));
+  return u.toString();
+}
+
 async function readJsonSafe(res) {
   const txt = await res.text();
   if (!txt) return null;
@@ -30,6 +38,13 @@ async function readJsonSafe(res) {
 
 function makeHeaders(extra = {}, includeAdminToken = true) {
   const h = { ...extra };
+
+  // Force no-cache headers (client-side request)
+  // Server also sets these, but sending here helps with intermediate caches.
+  if (!h["Cache-Control"] && !h["cache-control"]) h["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0";
+  if (!h.Pragma && !h.pragma) h.Pragma = "no-cache";
+  if (!h.Expires && !h.expires) h.Expires = "0";
+
   if (includeAdminToken && ADMIN_TOKEN) {
     h.Authorization = `Bearer ${ADMIN_TOKEN}`;
   }
@@ -37,7 +52,12 @@ function makeHeaders(extra = {}, includeAdminToken = true) {
 }
 
 async function request(method, path, body, opts = {}) {
-  const url = buildUrl(path);
+  let url = buildUrl(path);
+
+  // Cache-bust GETs so landing/reveal always show fresh timer/pool counts.
+  if (String(method).toUpperCase() === "GET") {
+    url = withCacheBust(url);
+  }
 
   const includeAdminToken = opts.includeAdminToken !== false;
   const headers = makeHeaders(opts.headers || {}, includeAdminToken);
@@ -46,6 +66,7 @@ async function request(method, path, body, opts = {}) {
     method,
     headers,
     credentials: "include", // ✅ REQUIRED for session cookie auth
+    cache: "no-store", // ✅ tells fetch not to use HTTP cache
   };
 
   if (body !== undefined) {
