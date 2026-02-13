@@ -82,7 +82,13 @@ const corsOptions = {
 
   // Make preflight explicit and reliable for Admin bearer token + JSON
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "expires",
+    "cache-control",
+    "pragma",
+  ],
 
   // (Optional) If you ever need the frontend to read a custom header, add it here:
   exposedHeaders: [],
