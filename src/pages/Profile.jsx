@@ -246,17 +246,15 @@ export default function Profile() {
   const [me, setMe] = useState(null);
   const [contest, setContest] = useState(null);
 
-  const [passActive, setPassActive] = useState(false);
-  const [passSupported, setPassSupported] = useState(false);
+  // Pass is currently NOT supported in backend (my-pass 404). Disable client-side feature.
+  const passSupported = false;
+  const passActive = true;
 
   const [myEntry, setMyEntry] = useState(null);
   const [myEntryMeta, setMyEntryMeta] = useState({
     contestId: null,
     contestActivatedAt: null,
   });
-
-  // NOTE: lastWeek UI block removed, so we no longer need this state
-  // const [lastWeek, setLastWeek] = useState(null);
 
   const [guessRaw, setGuessRaw] = useState("");
   const guess = useMemo(() => padGuess(guessRaw, 3), [guessRaw]);
@@ -301,9 +299,11 @@ export default function Profile() {
 
   const locked = paidLocked;
 
-  async function refresh() {
-    setErr("");
-    setLoading(true);
+  async function refresh({ silent = false } = {}) {
+    if (!silent) {
+      setErr("");
+      setLoading(true);
+    }
 
     try {
       const m = await authMe();
@@ -319,49 +319,28 @@ export default function Profile() {
       // Reset pending-edit UI on refresh
       setEditPending(false);
 
-      // Parallelize the optional calls for faster load
-      const [entryRes, passRes] = await Promise.allSettled([
-        apiGet("/api/my-entry"),
-        apiGet("/api/my-pass"),
-        // apiGet("/api/last-week"), // removed with UI block
-      ]);
+      // Only fetch entry (pass removed)
+      const entryRes = await apiGet("/api/my-entry");
 
-      // Entry
-      if (entryRes.status === "fulfilled") {
-        const e = entryRes.value;
-        setMyEntry(e?.ok ? e.entry : null);
+      if (entryRes?.ok) {
+        setMyEntry(entryRes.entry || null);
         setMyEntryMeta({
-          contestId: e?.contestId || null,
-          contestActivatedAt: e?.contestActivatedAt ?? null,
+          contestId: entryRes?.contestId || null,
+          contestActivatedAt: entryRes?.contestActivatedAt ?? null,
         });
 
         // Prefill guess only when NOT paid
-        if (e?.ok && e?.entry?.guess && !(e?.entry?.paid)) {
-          setGuessRaw(String(e.entry.guess));
+        if (entryRes?.entry?.guess && !entryRes?.entry?.paid) {
+          setGuessRaw(String(entryRes.entry.guess));
         }
       } else {
         setMyEntry(null);
         setMyEntryMeta({ contestId: null, contestActivatedAt: null });
       }
 
-      // Pass
-      if (passRes.status === "fulfilled") {
-        const p = passRes.value;
-        if (p && typeof p === "object" && ("active" in p || "passActive" in p || p?.ok)) {
-          setPassSupported(true);
-          setPassActive(!!(p.active ?? p.passActive));
-        } else {
-          setPassSupported(false);
-          setPassActive(false);
-        }
-      } else {
-        setPassSupported(false);
-        setPassActive(false);
-      }
-
       // Checkout message (only meaningful when Stripe enabled)
       if (STRIPE_ENABLED && checkoutResult === "success") {
-        setStatus("Payment received. Your entry is recorded.");
+        setStatus("Payment received. Updating your entry…");
       } else if (STRIPE_ENABLED && checkoutResult === "cancel") {
         setStatus("Checkout canceled. No entry was submitted.");
       } else {
@@ -370,12 +349,21 @@ export default function Profile() {
     } catch (e) {
       setErr(e?.message || "Failed to load.");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }
 
   useEffect(() => {
     refresh();
+
+    // If we just returned from Stripe success, poll a couple times to catch webhook lag.
+    if (STRIPE_ENABLED && checkoutResult === "success") {
+      const timers = [];
+      timers.push(setTimeout(() => refresh({ silent: true }), 1200));
+      timers.push(setTimeout(() => refresh({ silent: true }), 3200));
+      timers.push(setTimeout(() => refresh({ silent: true }), 6200));
+      return () => timers.forEach(clearTimeout);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -383,7 +371,7 @@ export default function Profile() {
   const endsOn = contest?.endsOn ?? null;
   const activatedAt = contest?.activatedAt ?? null;
 
-  const needsPass = passSupported ? !passActive : false;
+  const needsPass = false;
 
   const canProceed =
     !loading &&
@@ -778,8 +766,6 @@ export default function Profile() {
               </div>
             </div>
           </div>
-
-          {/* LAST WEEK block removed */}
         </div>
       </PanelShell>
 
