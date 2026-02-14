@@ -1,8 +1,14 @@
 // src/lib/api.js
 
-// If you deploy frontend+backend separately on Render, set VITE_API_BASE to your backend URL.
-// Example: VITE_API_BASE=https://your-backend.onrender.com
+// IMPORTANT:
+// Your frontend is currently serving index.html for "/api/*" (SPA fallback).
+// So API_BASE MUST be set (via VITE_API_BASE) to your backend origin, e.g.
+// VITE_API_BASE=https://p3d4.onrender.com
+//
+// This file enforces that in production, and also guards against HTML responses.
+
 const API_BASE = String(import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
+const IS_PROD = String(import.meta.env.MODE || "").toLowerCase() === "production";
 
 let ADMIN_TOKEN = null;
 
@@ -19,20 +25,37 @@ function buildUrl(path) {
 }
 
 function withCacheBust(url) {
-  // Only needed for GET, but safe even if called elsewhere (we will only call for GET).
-  // Helps defeat any proxy/CDN/browser cache weirdness.
+  // Only needed for GET, but safe even if called elsewhere (we only call for GET).
   const u = new URL(url, window.location.origin);
   u.searchParams.set("__ts", String(Date.now()));
   return u.toString();
 }
 
-async function readJsonSafe(res) {
+async function readJsonStrict(res, urlForError) {
+  const ct = (res.headers.get("content-type") || "").toLowerCase();
   const txt = await res.text();
+
+  // If we didn't get JSON, surface a very clear error (this was your exact bug).
+  if (!ct.includes("application/json")) {
+    const preview = (txt || "").slice(0, 200).replace(/\s+/g, " ").trim();
+    const err = new Error(
+      `API returned non-JSON (${res.status}) from ${urlForError}. ` +
+        `Content-Type="${ct || "unknown"}". ` +
+        `Preview: ${preview || "(empty)"}`
+    );
+    err.status = res.status;
+    err.data = { raw: txt, contentType: ct };
+    throw err;
+  }
+
   if (!txt) return null;
   try {
     return JSON.parse(txt);
   } catch {
-    return { raw: txt };
+    const err = new Error(`Invalid JSON from ${urlForError} (${res.status}).`);
+    err.status = res.status;
+    err.data = { raw: txt, contentType: ct };
+    throw err;
   }
 }
 
@@ -40,8 +63,8 @@ function makeHeaders(extra = {}, includeAdminToken = true) {
   const h = { ...extra };
 
   // Force no-cache headers (client-side request)
-  // Server also sets these, but sending here helps with intermediate caches.
-  if (!h["Cache-Control"] && !h["cache-control"]) h["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0";
+  if (!h["Cache-Control"] && !h["cache-control"])
+    h["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0";
   if (!h.Pragma && !h.pragma) h.Pragma = "no-cache";
   if (!h.Expires && !h.expires) h.Expires = "0";
 
@@ -52,6 +75,15 @@ function makeHeaders(extra = {}, includeAdminToken = true) {
 }
 
 async function request(method, path, body, opts = {}) {
+  // Enforce correct configuration in production.
+  // Your hosting currently SPA-fallbacks "/api/*" to index.html, so API_BASE must be set.
+  if (IS_PROD && !API_BASE) {
+    throw new Error(
+      "VITE_API_BASE is not set. In production your frontend will serve index.html for /api/* " +
+        "so API calls must target the backend origin (e.g. https://p3d4.onrender.com)."
+    );
+  }
+
   let url = buildUrl(path);
 
   // Cache-bust GETs so landing/reveal always show fresh timer/pool counts.
@@ -86,7 +118,8 @@ async function request(method, path, body, opts = {}) {
     throw err;
   }
 
-  const data = await readJsonSafe(res);
+  // Strict JSON read (throws if HTML comes back)
+  const data = await readJsonStrict(res, url);
 
   if (!res.ok) {
     const msg = (data && (data.error || data.message)) || `Request failed (${res.status})`;
