@@ -254,7 +254,7 @@ export default function Landing() {
       pollRef.current = setInterval(() => {
         if (document.visibilityState !== "visible") return;
         refreshContest({ silent: true });
-      }, 10000);
+      }, 5000);
     });
 
     const onVis = () => {
@@ -476,10 +476,10 @@ export default function Landing() {
       >
         <div style={{ textAlign: "left" }}>
           <ul style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 10, color: "rgba(255,255,255,0.86)" }}>
-            <li>Secure your 3-digit number before the weekly cutoff.</li>
-            <li>The prize pool grows with every entry and locks at cutoff.</li>
+            <li>Submit your 3-digit number before the timer hits zero.</li>
+            <li>The prize pool grows with every entry.</li>
             <li>Saturday night’s Pick 3 drawing sets the official target number.</li>
-            <li>The closest entry wins the cash prize.</li>
+            <li>The closest entry to that Pick 3 drawing wins the cash prize.</li>
             <li>All results are published in Reveal when the timer expires.</li>
           </ul>
         </div>

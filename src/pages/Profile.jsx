@@ -18,6 +18,14 @@ function formatDateTime(ts) {
   return new Date(ts).toLocaleString();
 }
 
+function dollarsFromCents(cents) {
+  return (Number(cents || 0) / 100).toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+  });
+}
+
 // Stripe feature flag (frontend)
 const STRIPE_ENABLED = String(import.meta.env.VITE_STRIPE_ENABLED || "")
   .toLowerCase()
@@ -265,6 +273,10 @@ export default function Profile() {
   // ✅ Allow editing guess during pending checkout
   const [editPending, setEditPending] = useState(false);
 
+  // ✅ NEW: persistent polling every 5s while visible
+  const pollRef = useRef(null);
+  const mountedRef = useRef(false);
+
   const { checkoutResult, sessionId } = useMemo(() => {
     try {
       const p = new URLSearchParams(window.location.search);
@@ -349,14 +361,16 @@ export default function Profile() {
       } else {
         setStatus("");
       }
+
+      if (!silent) setErr("");
     } catch (e) {
-      setErr(e?.message || "Failed to load.");
+      if (!silent) setErr(e?.message || "Failed to load.");
     } finally {
       if (!silent) setLoading(false);
     }
   }
 
-  // ✅ NEW: confirm Stripe session after redirect (authoritative for UI)
+  // ✅ confirm Stripe session after redirect (authoritative for UI)
   async function confirmCheckoutIfNeeded() {
     if (!STRIPE_ENABLED) return;
     if (checkoutResult !== "success") return;
@@ -372,12 +386,28 @@ export default function Profile() {
         const r = await apiGet(`/api/checkout/confirm?session_id=${encodeURIComponent(sessionId)}`);
         if (r?.ok && r?.paid) return;
       } catch {
-        // ignore and retry; refresh() will still show latest we have
+        // ignore and retry
       }
     }
   }
 
   useEffect(() => {
+    mountedRef.current = true;
+
+    const startPolling = () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(() => {
+        if (document.visibilityState !== "visible") return;
+        refresh({ silent: true });
+      }, 5000);
+    };
+
+    const onVis = () => {
+      if (document.visibilityState === "visible") {
+        refresh({ silent: true });
+      }
+    };
+
     (async () => {
       await refresh();
 
@@ -386,16 +416,29 @@ export default function Profile() {
         await confirmCheckoutIfNeeded();
         await refresh({ silent: true });
 
-        // extra refreshes to catch any delayed contest increments
-        const timers = [];
-        timers.push(setTimeout(() => refresh({ silent: true }), 1200));
-        timers.push(setTimeout(() => refresh({ silent: true }), 3200));
-        timers.push(setTimeout(() => refresh({ silent: true }), 6200));
-        return () => timers.forEach(clearTimeout);
+        // a couple extra refreshes to catch any delayed contest increments
+        setTimeout(() => {
+          if (mountedRef.current) refresh({ silent: true });
+        }, 1200);
+        setTimeout(() => {
+          if (mountedRef.current) refresh({ silent: true });
+        }, 3200);
+        setTimeout(() => {
+          if (mountedRef.current) refresh({ silent: true });
+        }, 6200);
       }
-      return undefined;
+
+      if (!mountedRef.current) return;
+      startPolling();
     })();
 
+    document.addEventListener("visibilitychange", onVis);
+
+    return () => {
+      mountedRef.current = false;
+      document.removeEventListener("visibilitychange", onVis);
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -438,7 +481,7 @@ export default function Profile() {
   }
 
   async function beginCheckout(useExistingGuess = false) {
-    // ✅ If Stripe is not enabled, never enter pending states or scary UX.
+    // If Stripe is not enabled, never enter pending states or scary UX.
     if (!STRIPE_ENABLED) {
       setErr("");
       setStatus("Payments are not enabled yet on this build.");
@@ -503,6 +546,17 @@ export default function Profile() {
     </div>
   );
 
+  // UI helpers for "player cards" (this profile’s live card)
+  const prizeText = useMemo(() => dollarsFromCents(contest?.prizeCents || 0), [contest?.prizeCents]);
+  const playerCount = Number(contest?.entryCount ?? contest?.playerCount ?? 0);
+  const playerCountText = Number.isFinite(playerCount) ? playerCount.toLocaleString("en-US") : "—";
+  const entryGuessText = locked ? String(myEntry?.guess ?? "—") : "—";
+  const entryStatusText = locked
+    ? String(myEntry?.status || "PAID_LOCKED")
+    : STRIPE_ENABLED && pendingPayment
+    ? String(myEntry?.status || "CHECKOUT_IN_PROGRESS")
+    : "—";
+
   return (
     <>
       <PanelShell label="" labelClass="profile" footer={null}>
@@ -550,6 +604,131 @@ export default function Profile() {
               </div>
             </>
           )}
+
+          {/* PLAYER CARD (live snapshot of what you have done) */}
+          <div
+            style={{
+              padding: "14px 14px",
+              borderRadius: 14,
+              border: "1px solid rgba(255,255,255,0.10)",
+              background: "rgba(255,255,255,0.02)",
+              textAlign: "left",
+            }}
+          >
+            <div className="label" style={{ marginBottom: 10, textAlign: "center" }}>
+              Your Player Card
+            </div>
+
+            <div style={{ display: "grid", gap: 10 }}>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+                  gap: 10,
+                }}
+              >
+                <div
+                  style={{
+                    borderRadius: 12,
+                    padding: "10px 12px",
+                    background: "rgba(255,255,255,0.04)",
+                    border: "1px solid rgba(255,255,255,0.08)",
+                    minHeight: 54,
+                    display: "grid",
+                    alignContent: "center",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: 10,
+                      letterSpacing: "0.16em",
+                      textTransform: "uppercase",
+                      opacity: 0.7,
+                    }}
+                  >
+                    Prize pool
+                  </div>
+                  <div style={{ fontSize: 16, fontWeight: 900, marginTop: 2 }}>{prizeText}</div>
+                </div>
+
+                <div
+                  style={{
+                    borderRadius: 12,
+                    padding: "10px 12px",
+                    background: "rgba(255,255,255,0.04)",
+                    border: "1px solid rgba(255,255,255,0.08)",
+                    minHeight: 54,
+                    display: "grid",
+                    alignContent: "center",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: 10,
+                      letterSpacing: "0.16em",
+                      textTransform: "uppercase",
+                      opacity: 0.7,
+                    }}
+                  >
+                    Players this round
+                  </div>
+                  <div style={{ fontSize: 16, fontWeight: 900, marginTop: 2 }}>{playerCountText}</div>
+                </div>
+              </div>
+
+              <div
+                style={{
+                  borderRadius: 12,
+                  padding: "12px 12px",
+                  background: "rgba(255,255,255,0.015)",
+                  border: "1px solid rgba(255,255,255,0.10)",
+                }}
+              >
+                <div style={{ display: "grid", gap: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span className="label">Game ending on</span>
+                    <span className="value">{endsOn || "—"}</span>
+                  </div>
+
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span className="label">Submission</span>
+                    <span className="value">{entryGuessText}</span>
+                  </div>
+
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span className="label">Locked timestamp</span>
+                    <span className="value">{locked ? formatDateTime(myEntry?.timestamp) : "—"}</span>
+                  </div>
+
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span className="label">Entry status</span>
+                    <span className="value">{entryStatusText}</span>
+                  </div>
+                </div>
+
+                {isQueued || contestNotActivated ? (
+                  <div
+                    className="miniMuted"
+                    style={{
+                      marginTop: 10,
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                      border: "1px solid rgba(255,255,255,0.10)",
+                      background: "rgba(255,255,255,0.012)",
+                      textAlign: "left",
+                      lineHeight: 1.25,
+                    }}
+                  >
+                    <div style={{ fontWeight: 900, marginBottom: 6 }}>Queued for next week</div>
+                    <div>
+                      Entries submitted after cutoff are saved immediately, but the prize display updates after the Sunday
+                      reset.
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </div>
 
           {/* THIS WEEK */}
           <div
@@ -613,8 +792,8 @@ export default function Profile() {
                 {!editPending ? (
                   <>
                     <div style={{ marginBottom: 10 }}>
-                      Your entry is recorded only after payment is completed. You can resume checkout or change your
-                      guess and try again.
+                      Your entry is recorded only after payment is completed. You can resume checkout or change your guess
+                      and try again.
                     </div>
 
                     <div className="form" style={{ marginTop: 0 }}>
@@ -709,27 +888,6 @@ export default function Profile() {
             {locked && (
               <>
                 <DigitBox value={String(myEntry?.guess || "")} onChange={() => {}} disabled />
-
-                {isQueued || contestNotActivated ? (
-                  <div
-                    className="miniMuted"
-                    style={{
-                      marginTop: 10,
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      border: "1px solid rgba(255,255,255,0.10)",
-                      background: "rgba(255,255,255,0.012)",
-                      textAlign: "left",
-                      lineHeight: 1.25,
-                    }}
-                  >
-                    <div style={{ fontWeight: 900, marginBottom: 6 }}>Queued for next week</div>
-                    <div>
-                      Entries submitted after cutoff are saved immediately, but the prize display updates after the
-                      Sunday reset.
-                    </div>
-                  </div>
-                ) : null}
 
                 <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
