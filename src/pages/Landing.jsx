@@ -226,7 +226,6 @@ export default function Landing() {
       if (c?.ok) setContest(c);
       else setContest(null);
 
-      // auth check can be less frequent, but keeping it here is fine & cheap
       try {
         const m = await authMe();
         setAuthed(!!m?.ok);
@@ -240,7 +239,6 @@ export default function Landing() {
         setContest(null);
         setErr("Failed to load contest state.");
       }
-      // silent refresh failures should not nuke the UI
     } finally {
       if (!silent) setLoading(false);
     }
@@ -249,16 +247,14 @@ export default function Landing() {
   useEffect(() => {
     mountedRef.current = true;
 
-    // Initial load (shows loading state)
     refreshContest({ silent: false }).finally(() => {
-      // After initial load, start polling silently
       if (!mountedRef.current) return;
 
       if (pollRef.current) clearInterval(pollRef.current);
       pollRef.current = setInterval(() => {
         if (document.visibilityState !== "visible") return;
         refreshContest({ silent: true });
-      }, 10000); // 10s poll keeps it "live" without hammering
+      }, 10000);
     });
 
     const onVis = () => {
@@ -292,9 +288,14 @@ export default function Landing() {
     nav("/reveal");
   }
 
-  const playerCountText =
-    contest?.playerCount == null ? "—" : Number(contest.playerCount || 0).toLocaleString("en-US");
+  // ✅ Support both field names: backend uses entryCount; some older clients used playerCount.
+  const rawCount =
+    contest?.entryCount ?? contest?.playerCount ?? contest?.players ?? contest?.count ?? null;
 
+  const playerCountText =
+    rawCount == null ? "—" : Number(rawCount || 0).toLocaleString("en-US");
+
+  // "Total paid out" might not exist on contest; keep as-is but never break
   const totalPaidText = useMemo(
     () => dollarsFromCents(contest?.totalPaidCents || 0),
     [contest?.totalPaidCents]
@@ -473,17 +474,16 @@ export default function Landing() {
           </button>
         }
       >
-       <div style={{ textAlign: "left" }}>
-  <ul style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 10, color: "rgba(255,255,255,0.86)" }}>
-    <li>Secure your 3-digit number before the weekly cutoff.</li>
-    <li>The prize pool grows with every entry and locks at cutoff.</li>
-    <li>Saturday night’s Pick 3 drawing sets the official target number.</li>
-    <li>The closest entry wins the cash prize.</li>
-    <li>All results are published in Reveal when the timer expires.</li>
-  </ul>
-</div>
-</Modal>
-
+        <div style={{ textAlign: "left" }}>
+          <ul style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 10, color: "rgba(255,255,255,0.86)" }}>
+            <li>Secure your 3-digit number before the weekly cutoff.</li>
+            <li>The prize pool grows with every entry and locks at cutoff.</li>
+            <li>Saturday night’s Pick 3 drawing sets the official target number.</li>
+            <li>The closest entry wins the cash prize.</li>
+            <li>All results are published in Reveal when the timer expires.</li>
+          </ul>
+        </div>
+      </Modal>
 
       <Modal
         open={loginToRevealOpen}

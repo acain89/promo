@@ -265,12 +265,15 @@ export default function Profile() {
   // ✅ Allow editing guess during pending checkout
   const [editPending, setEditPending] = useState(false);
 
-  const checkoutResult = useMemo(() => {
+  const { checkoutResult, sessionId } = useMemo(() => {
     try {
       const p = new URLSearchParams(window.location.search);
-      return String(p.get("checkout") || "").toLowerCase(); // success | cancel | ""
+      return {
+        checkoutResult: String(p.get("checkout") || "").toLowerCase(), // success | cancel | ""
+        sessionId: String(p.get("session_id") || "").trim(),
+      };
     } catch {
-      return "";
+      return { checkoutResult: "", sessionId: "" };
     }
   }, []);
 
@@ -353,17 +356,46 @@ export default function Profile() {
     }
   }
 
-  useEffect(() => {
-    refresh();
+  // ✅ NEW: confirm Stripe session after redirect (authoritative for UI)
+  async function confirmCheckoutIfNeeded() {
+    if (!STRIPE_ENABLED) return;
+    if (checkoutResult !== "success") return;
+    if (!sessionId) return;
 
-    // If we just returned from Stripe success, poll a couple times to catch webhook lag.
-    if (STRIPE_ENABLED && checkoutResult === "success") {
-      const timers = [];
-      timers.push(setTimeout(() => refresh({ silent: true }), 1200));
-      timers.push(setTimeout(() => refresh({ silent: true }), 3200));
-      timers.push(setTimeout(() => refresh({ silent: true }), 6200));
-      return () => timers.forEach(clearTimeout);
+    // best-effort retries: Stripe or Firestore writes can lag a moment
+    const delays = [0, 800, 2000, 4500];
+    for (let i = 0; i < delays.length; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, delays[i]));
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const r = await apiGet(`/api/checkout/confirm?session_id=${encodeURIComponent(sessionId)}`);
+        if (r?.ok && r?.paid) return;
+      } catch {
+        // ignore and retry; refresh() will still show latest we have
+      }
     }
+  }
+
+  useEffect(() => {
+    (async () => {
+      await refresh();
+
+      // If we just returned from Stripe success, explicitly confirm, then refresh again.
+      if (STRIPE_ENABLED && checkoutResult === "success") {
+        await confirmCheckoutIfNeeded();
+        await refresh({ silent: true });
+
+        // extra refreshes to catch any delayed contest increments
+        const timers = [];
+        timers.push(setTimeout(() => refresh({ silent: true }), 1200));
+        timers.push(setTimeout(() => refresh({ silent: true }), 3200));
+        timers.push(setTimeout(() => refresh({ silent: true }), 6200));
+        return () => timers.forEach(clearTimeout);
+      }
+      return undefined;
+    })();
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

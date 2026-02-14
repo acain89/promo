@@ -1,13 +1,11 @@
 // backend/routes/checkout.js
 import { Router } from "express";
-import Stripe from "stripe";
 
 import requireUser from "../middleware/auth.js";
 import rateLimit from "../middleware/rateLimit.js";
 
 import {
   FRONTEND_URL,
-  STRIPE_SECRET_KEY,
   UNPAID_EXPIRE_MS,
   BRAND_NAME,
   MODES,
@@ -17,11 +15,9 @@ import { db } from "../lib/firestore.js";
 import { auditLog } from "../lib/audit.js";
 import { onlyDigits, normalizeNumber, nowMs } from "../lib/utils.js";
 import { ensureActiveContestNow } from "../lib/time.js";
+import { stripe } from "../lib/stripe.js";
 
 const r = Router();
-
-// Treat Stripe as "enabled" only if we have a secret key AND can construct the client
-const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
 // Small helper: normalize frontend url once
 function cleanBase(u) {
@@ -223,11 +219,11 @@ r.post(
             },
           ],
 
-          // ✅ deterministic entryId so webhook can always find the doc to update
+          // ✅ deterministic entryId so webhook/confirm can always find the doc to update
           metadata: {
             userId: req.user.id,
             contestId: contest.id,
-            entryId: req.user.id, // deterministic doc id
+            entryId: req.user.id,
             contestEndsOn: contest.endsOn || "",
             guess: normalizedGuess,
             checkoutAttempt: String(checkoutAttempt),

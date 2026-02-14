@@ -14,6 +14,7 @@ import authRoutes from "./routes/auth.js";
 import requireUser from "./middleware/auth.js";
 import publicRoutes from "./routes/public.js";
 import checkoutRoutes from "./routes/checkout.js";
+import checkoutConfirmRoutes from "./routes/checkoutConfirm.js";
 import adminRoutes from "./routes/admin.js";
 import adminUsers from "./routes/adminUsers.js";
 
@@ -82,17 +83,9 @@ const corsOptions = {
 
   // Make preflight explicit and reliable for Admin bearer token + JSON
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: [
-    "Content-Type",
-    "Authorization",
-    "expires",
-    "cache-control",
-    "pragma",
-  ],
+  allowedHeaders: ["Content-Type", "Authorization", "expires", "cache-control", "pragma"],
 
-  // (Optional) If you ever need the frontend to read a custom header, add it here:
   exposedHeaders: [],
-
   optionsSuccessStatus: 204,
   maxAge: 86400,
 };
@@ -132,6 +125,7 @@ app.use(adminUsers);
 
 // Protected (user session required)
 app.use(requireUser, checkoutRoutes);
+app.use(requireUser, checkoutConfirmRoutes);
 
 /* =========================================================
    FALLBACKS
