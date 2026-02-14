@@ -54,6 +54,7 @@ function safeDescriptorSuffix(name) {
    - If Stripe disabled → NO writes, return 501 cleanly
    - If Stripe enabled → creates/updates entry as PENDING_PAYMENT
    - ✅ Allow changing guess BEFORE payment
+   - ✅ Include deterministic entryId in session metadata
 ========================================================= */
 
 r.post(
@@ -205,9 +206,7 @@ r.post(
           mode: "payment",
           payment_method_types: ["card"],
 
-          payment_intent_data: suffix
-            ? { statement_descriptor_suffix: suffix }
-            : undefined,
+          payment_intent_data: suffix ? { statement_descriptor_suffix: suffix } : undefined,
 
           line_items: [
             {
@@ -220,9 +219,11 @@ r.post(
             },
           ],
 
+          // ✅ Include deterministic entryId so webhook can always find the doc to update
           metadata: {
             userId: req.user.id,
             contestId: contest.id,
+            entryId: req.user.id, // deterministic doc id
             contestEndsOn: contest.endsOn || "",
             guess: normalizedGuess,
             checkoutAttempt: String(checkoutAttempt),
@@ -230,8 +231,7 @@ r.post(
 
           custom_text: {
             submit: {
-              message:
-                "No purchase necessary. Free mail-in entry (AMOE) available. One entry per person per contest.",
+              message: "No purchase necessary. Free mail-in entry (AMOE) available. One entry per person per contest.",
             },
           },
 
