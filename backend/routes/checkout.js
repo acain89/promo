@@ -201,6 +201,10 @@ r.post(
       const suffix = safeDescriptorSuffix(BRAND_NAME || "");
       const base = cleanBase(FRONTEND_URL);
 
+      // ✅ IMPORTANT: include session_id so we can confirm/reconcile after redirect
+      const successUrl = `${base}/profile?checkout=success&session_id={CHECKOUT_SESSION_ID}`;
+      const cancelUrl = `${base}/profile?checkout=cancel`;
+
       const session = await stripe.checkout.sessions.create(
         {
           mode: "payment",
@@ -219,7 +223,7 @@ r.post(
             },
           ],
 
-          // ✅ Include deterministic entryId so webhook can always find the doc to update
+          // ✅ deterministic entryId so webhook can always find the doc to update
           metadata: {
             userId: req.user.id,
             contestId: contest.id,
@@ -231,12 +235,13 @@ r.post(
 
           custom_text: {
             submit: {
-              message: "No purchase necessary. Free mail-in entry (AMOE) available. One entry per person per contest.",
+              message:
+                "No purchase necessary. Free mail-in entry (AMOE) available. One entry per person per contest.",
             },
           },
 
-          success_url: `${base}/profile?checkout=success`,
-          cancel_url: `${base}/profile?checkout=cancel`,
+          success_url: successUrl,
+          cancel_url: cancelUrl,
         },
         { idempotencyKey }
       );
