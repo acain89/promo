@@ -197,9 +197,11 @@ r.post(
       const suffix = safeDescriptorSuffix(BRAND_NAME || "");
       const base = cleanBase(FRONTEND_URL);
 
-      // ✅ IMPORTANT: include session_id so we can confirm/reconcile after redirect
+      // ✅ success includes session_id so Profile can call /api/checkout/confirm
       const successUrl = `${base}/profile?checkout=success&session_id={CHECKOUT_SESSION_ID}`;
-      const cancelUrl = `${base}/profile?checkout=cancel`;
+
+      // ✅ cancel returns to plain Profile screen (no alternate panel / query state)
+      const cancelUrl = `${base}/profile`;
 
       const session = await stripe.checkout.sessions.create(
         {

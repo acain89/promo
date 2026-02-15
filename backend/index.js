@@ -53,7 +53,9 @@ app.use((req, res, next) => {
   }
 
   // helps caches handle CORS responses correctly
-  res.setHeader("Vary", "Origin");
+const prev = res.getHeader("Vary");
+if (!prev) res.setHeader("Vary", "Origin");
+else if (!String(prev).includes("Origin")) res.setHeader("Vary", `${prev}, Origin`);
 
   next();
 });

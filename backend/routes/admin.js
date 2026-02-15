@@ -33,7 +33,8 @@ const r = Router();
    HELPERS
 ========================================================= */
 
-const DEFAULT_POOL_CONTRIB_CENTS = 355;
+// ✅ Keep consistent with Stripe math and confirm/webhook defaults
+const DEFAULT_POOL_CONTRIB_CENTS = 455;
 
 async function getPaidContestByIdOrLast(contestIdMaybe) {
   let id = String(contestIdMaybe || "").trim();
@@ -52,6 +53,12 @@ function isPaidEntryEligible(e) {
   if (!e.paid) return false;
   const s = String(e.status || "").toUpperCase();
   if (s === "REFUNDED" || s === "DISPUTED" || s === "EXPIRED") return false;
+
+  // If you're using countedInContest, prefer it as source of truth (back-compat safe)
+  if (typeof e.countedInContest === "boolean") {
+    return e.countedInContest === true;
+  }
+
   // IMPORTANT: queued entries are not applied to the contest prize/entryCount until activated
   if (s === "QUEUED") return false;
   return true;
@@ -89,9 +96,53 @@ async function getPoolContributionCents() {
   }
 }
 
-async function setPoolContributionCents(cents) {
+/**
+ * Decide what contribution should be used for a contest right now:
+ * - locked wins (historical accounting)
+ * - else contest.poolContributionCents (admin-editable for THIS contest)
+ * - else cfgCents (global default from config/public)
+ * - else constant default
+ */
+function effectivePoolContributionCents(contest, cfgCents) {
+  const locked = clampInt(contest?.poolContributionCentsLocked, 0, 5000);
+  if (locked != null) return locked;
+
+  const perContest = clampInt(contest?.poolContributionCents, 0, 5000);
+  if (perContest != null) return perContest;
+
+  const cfg = clampInt(cfgCents, 0, 5000);
+  if (cfg != null) return cfg;
+
+  return DEFAULT_POOL_CONTRIB_CENTS;
+}
+
+/**
+ * Accept either:
+ * - cents: 455
+ * - dollars: 4.55 (or "$4.55")
+ */
+function parseMoneyToCents(input) {
+  const raw = String(input ?? "").trim();
+  const cleaned = raw.replace(/[^0-9.]/g, "");
+  if (!cleaned) return null;
+
+  if (cleaned.includes(".")) {
+    const f = Number(cleaned);
+    if (!Number.isFinite(f)) return null;
+    return Math.round(f * 100);
+  }
+
+  const i = Number(cleaned);
+  if (!Number.isFinite(i)) return null;
+  return Math.floor(i);
+}
+
+async function setPoolContributionCents(input) {
+  const cents = parseMoneyToCents(input);
   const v = clampInt(cents, 0, 5000); // allow up to $50.00 just in case
   if (v == null) throw new Error("Invalid pool contribution.");
+
+  // 1) Always persist global config
   await db().collection("config").doc("public").set(
     {
       poolContributionCents: v,
@@ -99,6 +150,42 @@ async function setPoolContributionCents(cents) {
     },
     { merge: true }
   );
+
+  // 2) Also apply to the ACTIVE contest so your live pool math can use it immediately.
+  //    Safety rules:
+  //    - Always set contest.poolContributionCents (editable/display)
+  //    - Only set poolContributionCentsLocked if contest has ZERO applied money and isn't activated
+  try {
+    const active = await ensureActiveContestNow();
+    if (active?.id) {
+      const ref = db().collection("contests").doc(active.id);
+      const snap = await ref.get();
+      if (snap.exists) {
+        const c = snap.data() || {};
+        const entryCount = Number(c.entryCount || 0);
+        const prizeCents = Number(c.prizeCents || 0);
+        const activatedAt = c.activatedAt ?? null;
+        const resolved = !!c.resolved;
+
+        const patch = {
+          poolContributionCents: v,
+          poolContributionUpdatedAt: nowMs(),
+        };
+
+        // Only safe to change locked if nothing has been counted yet
+        const safeToLockOrChangeLocked = !resolved && !activatedAt && entryCount === 0 && prizeCents === 0;
+
+        if (safeToLockOrChangeLocked) {
+          patch.poolContributionCentsLocked = v;
+        }
+
+        await ref.set(patch, { merge: true });
+      }
+    }
+  } catch {
+    // best-effort; config still saved even if active contest patch fails
+  }
+
   return v;
 }
 
@@ -267,7 +354,28 @@ r.post(
 
       await auditLog("admin_pool_config_set", { poolContributionCents: v }, req);
 
-      return res.json({ ok: true, poolContributionCents: v });
+      // Optional: echo active contest contribution values so Admin UI can show what happened
+      let activePatch = null;
+      try {
+        const active = await ensureActiveContestNow();
+        if (active?.id) {
+          const snap = await db().collection("contests").doc(active.id).get();
+          if (snap.exists) {
+            const c = snap.data() || {};
+            activePatch = {
+              contestId: active.id,
+              poolContributionCents: c.poolContributionCents ?? null,
+              poolContributionCentsLocked: c.poolContributionCentsLocked ?? null,
+              entryCount: Number(c.entryCount || 0),
+              prizeCents: Number(c.prizeCents || 0),
+              activatedAt: c.activatedAt ?? null,
+              resolved: !!c.resolved,
+            };
+          }
+        }
+      } catch {}
+
+      return res.json({ ok: true, poolContributionCents: v, active: activePatch });
     } catch (e) {
       return res.status(400).json({ error: e.message || "Failed to set pool config." });
     }
@@ -348,9 +456,9 @@ r.post(
       const { state: amoeState } = await getOrInitAmoeState();
 
       const poolContributionCents = await getPoolContributionCents();
-      const activeLocked = Number(active.poolContributionCentsLocked);
-      const activeContrib =
-        Number.isFinite(activeLocked) && activeLocked >= 0 ? Math.floor(activeLocked) : poolContributionCents;
+
+      const activeLocked = clampInt(active.poolContributionCentsLocked, 0, 5000);
+      const activeEffective = effectivePoolContributionCents(active, poolContributionCents);
 
       const totalPaidCents = await getTotalPaidCents();
 
@@ -362,7 +470,7 @@ r.post(
         const e = d.data();
         if (e && e.paid && String(e.status || "").toUpperCase() === "QUEUED") {
           queuedCount += 1;
-          queuedPrizeCents += activeContrib;
+          queuedPrizeCents += activeEffective;
         }
       });
 
@@ -376,8 +484,9 @@ r.post(
 
         config: {
           poolContributionCents,
-          activePoolContributionCentsLocked:
-            Number.isFinite(activeLocked) && activeLocked >= 0 ? Math.floor(activeLocked) : null,
+          activePoolContributionCentsLocked: activeLocked != null ? activeLocked : null,
+          activePoolContributionCentsEffective: activeEffective,
+          activePoolContributionCentsEditable: clampInt(active.poolContributionCents, 0, 5000) ?? null,
         },
 
         activeContest: {
@@ -393,8 +502,9 @@ r.post(
           entryCount: Number(active.entryCount || 0),
           prizeCents: Number(active.prizeCents || 0),
           activatedAt: active.activatedAt ?? null,
-          poolContributionCentsLocked:
-            Number.isFinite(activeLocked) && activeLocked >= 0 ? Math.floor(activeLocked) : null,
+          poolContributionCentsLocked: activeLocked != null ? activeLocked : null,
+          poolContributionCents: clampInt(active.poolContributionCents, 0, 5000) ?? null,
+          poolContributionCentsEffective: activeEffective,
         },
 
         lastContest: lastContest
@@ -409,11 +519,9 @@ r.post(
               entryCount: Number(lastContest.entryCount || 0),
               prizeCents: Number(lastContest.prizeCents || 0),
               activatedAt: lastContest.activatedAt ?? null,
-              poolContributionCentsLocked:
-                Number.isFinite(Number(lastContest.poolContributionCentsLocked)) &&
-                Number(lastContest.poolContributionCentsLocked) >= 0
-                  ? Math.floor(Number(lastContest.poolContributionCentsLocked))
-                  : null,
+              poolContributionCentsLocked: clampInt(lastContest.poolContributionCentsLocked, 0, 5000) ?? null,
+              poolContributionCents: clampInt(lastContest.poolContributionCents, 0, 5000) ?? null,
+              poolContributionCentsEffective: effectivePoolContributionCents(lastContest, poolContributionCents),
             }
           : null,
 
@@ -627,9 +735,7 @@ r.post(
       }
 
       const cfgCents = await getPoolContributionCents();
-      const lockedExisting = Number(c.poolContributionCentsLocked);
-      const lockCents =
-        Number.isFinite(lockedExisting) && lockedExisting >= 0 ? Math.floor(lockedExisting) : Math.floor(cfgCents);
+      const lockCents = effectivePoolContributionCents(c, cfgCents);
 
       const entriesSnap = await db().collection("entries").doc(contest.id).collection("items").get();
       let paidCount = 0;
@@ -645,25 +751,27 @@ r.post(
         entryCount: paidCount,
         prizeCents: paidCount * lockCents,
         poolContributionCentsLocked: lockCents,
+        poolContributionCents: clampInt(c.poolContributionCents, 0, 5000) ?? lockCents,
       };
 
       await contestRef.set(patch, { merge: true });
 
-      // Convert QUEUED → PAID
+      // Convert QUEUED → PAID (and mark counted)
       const batch = db().batch();
       entriesSnap.docs.forEach((d) => {
         const e = d.data();
         if (e && e.paid && String(e.status || "").toUpperCase() === "QUEUED") {
-          batch.update(d.ref, { status: "PAID", activatedAt: nowMs() });
+          batch.update(d.ref, {
+            status: "PAID",
+            activatedAt: nowMs(),
+            countedInContest: true,
+            countedAt: nowMs(),
+          });
         }
       });
       await batch.commit();
 
-      await auditLog(
-        "admin_paid_activate",
-        { contestId: contest.id, paidCount, poolContributionCentsLocked: lockCents },
-        req
-      );
+      await auditLog("admin_paid_activate", { contestId: contest.id, paidCount, poolContributionCentsLocked: lockCents }, req);
 
       return res.json({
         ok: true,
@@ -715,6 +823,7 @@ r.post(
           resetAt: nowMs(),
 
           poolContributionCentsLocked: Math.floor(cfgCents),
+          poolContributionCents: Math.floor(cfgCents),
         },
         { merge: true }
       );
@@ -766,8 +875,7 @@ r.post(
       const { ref: stateRef, state } = await getOrInitAmoeState();
 
       const status = String(state.status || "COLLECTING");
-      if (status === "RESOLVED")
-        return res.status(400).json({ error: "AMOE cycle is resolved. Reset cycle to start again." });
+      if (status === "RESOLVED") return res.status(400).json({ error: "AMOE cycle is resolved. Reset cycle to start again." });
       if (status === "READY") return res.status(400).json({ error: "AMOE is ready to resolve. Do not add more entries." });
 
       const cycleId = Number(state.cycleId || 1);

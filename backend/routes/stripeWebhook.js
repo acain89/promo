@@ -34,6 +34,24 @@ async function getPoolContributionCentsTx(tx) {
 }
 
 /**
+ * Resolve contribution for a contest, in priority order:
+ * 1) contest.poolContributionCentsLocked
+ * 2) contest.poolContributionCents (per-contest editable)
+ * 3) config/public.poolContributionCents
+ * 4) DEFAULT_POOL_CONTRIB_CENTS
+ */
+async function resolveContributionCentsTx(tx, contestRef, contest) {
+  const locked = clampInt(contest?.poolContributionCentsLocked, 0, 5000);
+  if (locked != null) return locked;
+
+  const perContest = clampInt(contest?.poolContributionCents, 0, 5000);
+  if (perContest != null) return perContest;
+
+  const cfgCents = await getPoolContributionCentsTx(tx);
+  return clampInt(cfgCents, 0, 5000) ?? DEFAULT_POOL_CONTRIB_CENTS;
+}
+
+/**
  * Try to locate the entry document robustly:
  * 1) entries/{contestId}/items/{entryId} (metadata)
  * 2) collectionGroup("items").where("stripeSessionId" == sessionId)
@@ -153,46 +171,70 @@ export default function stripeWebhookRouter() {
           return res.json({ received: true });
         }
 
-        // Update each matched entry; increment pool/count for its contest if live
+        // Update each matched entry; increment pool/count exactly once for its contest
         for (const entryRef of refs) {
-          const contestRef = entryRef.parent?.parent
-            ? db().collection("contests").doc(entryRef.parent.parent.id)
-            : null;
+          const contestDocId = entryRef.parent?.parent?.id || null;
+          const contestRef = contestDocId ? db().collection("contests").doc(contestDocId) : null;
 
           await db().runTransaction(async (tx) => {
             const entrySnap = await tx.get(entryRef);
             if (!entrySnap.exists) return;
 
             const entry = entrySnap.data() || {};
-            if (entry.paid) return; // already processed
 
-            // Contest doc is optional for marking entry paid, but needed for increments
-            let contestSnap = null;
+            // Load contest (if possible)
             let contest = null;
             if (contestRef) {
-              contestSnap = await tx.get(contestRef);
+              const contestSnap = await tx.get(contestRef);
               contest = contestSnap.exists ? (contestSnap.data() || {}) : null;
             }
 
-            tx.update(entryRef, {
-              paid: true,
-              paidAt: nowMs(),
-              status: "PAID",
-              stripeSessionId: stripeSessionId || entry.stripeSessionId || null,
-              paymentIntentId: paymentIntentId || entry.paymentIntentId || null,
-            });
+            // If contest is resolved, we mark queued and do NOT apply pool/count
+            if (contest && contest.resolved) {
+              // still mark paid if needed
+              if (!entry.paid) {
+                tx.update(entryRef, {
+                  paid: true,
+                  paidAt: nowMs(),
+                  status: "QUEUED",
+                  stripeSessionId: stripeSessionId || entry.stripeSessionId || null,
+                  paymentIntentId: paymentIntentId || entry.paymentIntentId || null,
+                  lastTouchedAt: nowMs(),
+                });
+              } else if (String(entry.status || "").toUpperCase() !== "QUEUED") {
+                tx.update(entryRef, { status: "QUEUED", lastTouchedAt: nowMs() });
+              }
+              return;
+            }
 
-            // Only increment if contest exists, live, and not resolved
-            if (contest && !contest.resolved && !!contest.activatedAt) {
-              const lockedExisting = Number(contest.poolContributionCentsLocked);
-              const cfgCents = await getPoolContributionCentsTx(tx);
+            // Always mark entry paid (idempotent)
+            if (!entry.paid) {
+              tx.update(entryRef, {
+                paid: true,
+                paidAt: nowMs(),
+                status: "PAID",
+                stripeSessionId: stripeSessionId || entry.stripeSessionId || null,
+                paymentIntentId: paymentIntentId || entry.paymentIntentId || null,
+                lastTouchedAt: nowMs(),
+              });
+            } else {
+              // keep session/intent fresh
+              tx.update(entryRef, {
+                stripeSessionId: stripeSessionId || entry.stripeSessionId || null,
+                paymentIntentId: paymentIntentId || entry.paymentIntentId || null,
+                lastTouchedAt: nowMs(),
+              });
+            }
 
-              const lockCents =
-                Number.isFinite(lockedExisting) && lockedExisting >= 0
-                  ? Math.floor(lockedExisting)
-                  : Math.floor(cfgCents);
+            // Apply contest increment EXACTLY ONCE
+            // Use a dedicated flag (works even if confirm route also runs)
+            const alreadyCounted = entry.countedInContest === true;
+            if (contestRef && contest && !alreadyCounted) {
+              const lockCents = await resolveContributionCentsTx(tx, contestRef, contest);
 
-              if (!(Number.isFinite(lockedExisting) && lockedExisting >= 0)) {
+              // If no locked value yet, lock it the first time we apply
+              const lockedExisting = clampInt(contest.poolContributionCentsLocked, 0, 5000);
+              if (lockedExisting == null) {
                 tx.update(contestRef, { poolContributionCentsLocked: lockCents });
               }
 
@@ -200,8 +242,11 @@ export default function stripeWebhookRouter() {
                 entryCount: admin.firestore.FieldValue.increment(1),
                 prizeCents: admin.firestore.FieldValue.increment(lockCents),
               });
-            } else if (contest && contest.resolved) {
-              tx.update(entryRef, { status: "QUEUED" });
+
+              tx.update(entryRef, {
+                countedInContest: true,
+                countedAt: nowMs(),
+              });
             }
           });
 
@@ -217,13 +262,16 @@ export default function stripeWebhookRouter() {
 
       /* =========================================================
          2) Payment Intent Succeeded (backup)
+         NOTE: This does NOT apply contest increments because we
+         can't safely map contest + idempotency flag here.
+         We only mark the entry paid.
       ========================================================== */
       if (event.type === "payment_intent.succeeded") {
         const pi = event.data.object;
 
         await updateEntryByPaymentIntent(
           pi.id,
-          { paid: true, paidAt: nowMs(), status: "PAID" },
+          { paid: true, paidAt: nowMs(), status: "PAID", lastTouchedAt: nowMs() },
           "webhook_pi_succeeded",
           pi
         );
@@ -243,6 +291,7 @@ export default function stripeWebhookRouter() {
             refundedAt: nowMs(),
             refundAmount: charge.amount_refunded ?? null,
             refundCurrency: charge.currency ?? null,
+            lastTouchedAt: nowMs(),
           },
           "webhook_charge_refunded",
           charge
@@ -267,6 +316,7 @@ export default function stripeWebhookRouter() {
               disputedAt: nowMs(),
               disputeId: dispute.id || null,
               disputeReason: dispute.reason || null,
+              lastTouchedAt: nowMs(),
             },
             "webhook_dispute_created",
             dispute
@@ -296,6 +346,7 @@ export default function stripeWebhookRouter() {
               disputeClosedAt: nowMs(),
               disputeId: dispute.id || null,
               disputeStatus: dispute.status || null,
+              lastTouchedAt: nowMs(),
             },
             "webhook_dispute_closed",
             dispute

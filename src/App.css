@@ -551,3 +551,15 @@ section{
     --panelH: min(88vh, 780px);
   }
 }
+
+.entry-neon-box {
+  border: 2px solid #00f0ff;
+  box-shadow: 
+    0 0 8px #00f0ff,
+    0 0 16px rgba(0, 240, 255, 0.6);
+  padding: 18px;
+  border-radius: 16px;
+  margin: 16px 0;
+}
+
+

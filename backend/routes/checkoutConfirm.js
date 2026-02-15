@@ -9,11 +9,56 @@ import { nowMs } from "../lib/utils.js";
 
 const r = Router();
 
+// Keep ONE default here (match your business math)
+const DEFAULT_POOL_CONTRIB_CENTS = 455; // $4.55
+
+function clampInt(n, lo, hi) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return null;
+  const i = Math.floor(v);
+  if (i < lo) return lo;
+  if (i > hi) return hi;
+  return i;
+}
+
+async function getPoolContributionCentsTx(tx) {
+  try {
+    const cfgRef = db().collection("config").doc("public");
+    const cfgSnap = await tx.get(cfgRef);
+    if (!cfgSnap.exists) return DEFAULT_POOL_CONTRIB_CENTS;
+
+    const d = cfgSnap.data() || {};
+    const v = clampInt(d.poolContributionCents, 0, 5000);
+    if (v == null) return DEFAULT_POOL_CONTRIB_CENTS;
+    return v;
+  } catch {
+    return DEFAULT_POOL_CONTRIB_CENTS;
+  }
+}
+
+/**
+ * Resolve contribution for a contest, in priority order:
+ * 1) contest.poolContributionCentsLocked
+ * 2) contest.poolContributionCents (per-contest editable via Admin)
+ * 3) config/public.poolContributionCents
+ * 4) DEFAULT_POOL_CONTRIB_CENTS
+ */
+async function resolveContributionCentsTx(tx, contestRef, contest) {
+  const locked = clampInt(contest?.poolContributionCentsLocked, 0, 5000);
+  if (locked != null) return locked;
+
+  const perContest = clampInt(contest?.poolContributionCents, 0, 5000);
+  if (perContest != null) return perContest;
+
+  const cfg = await getPoolContributionCentsTx(tx);
+  return clampInt(cfg, 0, 5000) ?? DEFAULT_POOL_CONTRIB_CENTS;
+}
+
 /**
  * GET /api/checkout/confirm?session_id=cs_test_...
  * - Verifies session is paid
  * - Marks entry PAID
- * - Increments contest entryCount + prizeCents (once)
+ * - Increments contest entryCount + prizeCents (exactly once)
  */
 r.get("/api/checkout/confirm", requireUser, async (req, res) => {
   try {
@@ -25,7 +70,6 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
     // Retrieve the session from Stripe
     const session = await stripe.checkout.sessions.retrieve(sessionId);
 
-    // Stripe v2020+ has payment_status; also ensure we have a payment_intent
     const paymentStatus = String(session.payment_status || "").toLowerCase();
     const paymentIntentId = session.payment_intent ? String(session.payment_intent) : null;
 
@@ -39,19 +83,27 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
 
     // Metadata must identify which entry to mark paid
     const contestId = String(session.metadata?.contestId || "").trim();
-    const entryId =
+    const entryIdFromMeta =
       String(session.metadata?.entryId || "").trim() ||
       String(session.metadata?.userId || "").trim();
 
-    // Fallback: assume entryId == logged-in user id if metadata missing
+    // Only allow confirming YOUR OWN entry (requireUser)
     const userId = String(req.user?.id || "").trim();
     const finalContestId = contestId;
-    const finalEntryId = entryId || userId;
+    const finalEntryId = entryIdFromMeta || userId;
 
-    if (!finalContestId || !finalEntryId) {
+    if (!finalContestId) {
       return res.status(400).json({
         ok: false,
-        error: "Missing contestId/entryId metadata on session.",
+        error: "Missing contestId metadata on session.",
+      });
+    }
+
+    // Security: never let user confirm someone else's entry doc
+    if (!userId || finalEntryId !== userId) {
+      return res.status(403).json({
+        ok: false,
+        error: "Forbidden.",
       });
     }
 
@@ -64,6 +116,7 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
     const contestRef = db().collection("contests").doc(finalContestId);
 
     let changed = false;
+    let appliedContestIncrement = false;
 
     await db().runTransaction(async (tx) => {
       const [entrySnap, contestSnap] = await Promise.all([tx.get(entryRef), tx.get(contestRef)]);
@@ -73,27 +126,62 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
       const entry = entrySnap.data() || {};
       const contest = contestSnap.data() || {};
 
-      // If already marked paid, idempotent success
-      if (entry.paid === true || String(entry.status || "").toUpperCase() === "PAID") return;
+      // Idempotency flags
+      const alreadyPaid = entry.paid === true;
+      const alreadyCounted = entry.countedInContest === true;
 
-      // Mark entry paid
-      tx.update(entryRef, {
-        paid: true,
-        paidAt: nowMs(),
-        status: "PAID",
-        stripeSessionId: session.id || null,
-        paymentIntentId: paymentIntentId || null,
-      });
+      // If contest is resolved, do NOT add to pool; mark queued (but still mark paid)
+      if (contest.resolved) {
+        if (!alreadyPaid) {
+          tx.update(entryRef, {
+            paid: true,
+            paidAt: nowMs(),
+            status: "QUEUED",
+            stripeSessionId: session.id || null,
+            paymentIntentId: paymentIntentId || null,
+            lastTouchedAt: nowMs(),
+          });
+          changed = true;
+        } else {
+          // keep IDs fresh + ensure QUEUED status
+          const curStatus = String(entry.status || "").toUpperCase();
+          tx.update(entryRef, {
+            status: curStatus === "QUEUED" ? entry.status : "QUEUED",
+            stripeSessionId: session.id || entry.stripeSessionId || null,
+            paymentIntentId: paymentIntentId || entry.paymentIntentId || null,
+            lastTouchedAt: nowMs(),
+          });
+        }
+        return;
+      }
 
-      // Increment contest only if contest is active + not resolved
-      // (match your webhook logic)
-      if (!contest.resolved && !!contest.activatedAt) {
-        const lockCents = Number.isFinite(Number(contest.poolContributionCentsLocked))
-          ? Math.floor(Number(contest.poolContributionCentsLocked))
-          : 455;
+      // Mark entry paid (idempotent)
+      if (!alreadyPaid) {
+        tx.update(entryRef, {
+          paid: true,
+          paidAt: nowMs(),
+          status: "PAID",
+          stripeSessionId: session.id || null,
+          paymentIntentId: paymentIntentId || null,
+          lastTouchedAt: nowMs(),
+        });
+        changed = true;
+      } else {
+        // keep lastTouchedAt + ids fresh (helps your UNPAID expiry logic hygiene)
+        tx.update(entryRef, {
+          stripeSessionId: session.id || entry.stripeSessionId || null,
+          paymentIntentId: paymentIntentId || entry.paymentIntentId || null,
+          lastTouchedAt: nowMs(),
+        });
+      }
 
-        // If not locked, lock it once
-        if (!(Number.isFinite(Number(contest.poolContributionCentsLocked)) && Number(contest.poolContributionCentsLocked) >= 0)) {
+      // Apply contest increment EXACTLY ONCE
+      if (!alreadyCounted) {
+        const lockCents = await resolveContributionCentsTx(tx, contestRef, contest);
+
+        // Lock it if missing so future accounting stays consistent
+        const lockedExisting = clampInt(contest.poolContributionCentsLocked, 0, 5000);
+        if (lockedExisting == null) {
           tx.update(contestRef, { poolContributionCentsLocked: lockCents });
         }
 
@@ -101,17 +189,23 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
           entryCount: admin.firestore.FieldValue.increment(1),
           prizeCents: admin.firestore.FieldValue.increment(lockCents),
         });
-      } else {
-        tx.update(entryRef, { status: "QUEUED" });
-      }
 
-      changed = true;
+        // Flag entry so confirm/webhook can never double-increment
+        tx.update(entryRef, {
+          countedInContest: true,
+          countedAt: nowMs(),
+        });
+
+        appliedContestIncrement = true;
+        changed = true;
+      }
     });
 
     return res.json({
       ok: true,
       paid: true,
       updated: changed,
+      contestIncremented: appliedContestIncrement,
       contestId: finalContestId,
       entryId: finalEntryId,
       paymentIntentId,

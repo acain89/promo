@@ -1,9 +1,11 @@
 // src/lib/api.js
 
 // IMPORTANT:
-// Your frontend is currently serving index.html for "/api/*" (SPA fallback).
-// So API_BASE MUST be set (via VITE_API_BASE) to your backend origin, e.g.
-// VITE_API_BASE=https://p3d4.onrender.com
+// Your frontend host may SPA-fallback "/api/*" to index.html.
+// In production, VITE_API_BASE MUST point to your backend origin, e.g.
+//   VITE_API_BASE=https://api.drawnfray.com
+// or (if you serve backend at same origin):
+//   VITE_API_BASE=https://drawnfray.com
 //
 // This file enforces that in production, and also guards against HTML responses.
 
@@ -35,12 +37,14 @@ async function readJsonStrict(res, urlForError) {
   const ct = (res.headers.get("content-type") || "").toLowerCase();
   const txt = await res.text();
 
-  // If we didn't get JSON, surface a very clear error (this was your exact bug).
+  // If we didn't get JSON, surface a very clear error (common SPA fallback symptom).
   if (!ct.includes("application/json")) {
     const preview = (txt || "").slice(0, 200).replace(/\s+/g, " ").trim();
     const err = new Error(
       `API returned non-JSON (${res.status}) from ${urlForError}. ` +
         `Content-Type="${ct || "unknown"}". ` +
+        `This usually means your frontend served index.html for an /api route (SPA fallback), ` +
+        `or your API_BASE points to the wrong origin. ` +
         `Preview: ${preview || "(empty)"}`
     );
     err.status = res.status;
@@ -49,6 +53,7 @@ async function readJsonStrict(res, urlForError) {
   }
 
   if (!txt) return null;
+
   try {
     return JSON.parse(txt);
   } catch {
@@ -62,6 +67,9 @@ async function readJsonStrict(res, urlForError) {
 function makeHeaders(extra = {}, includeAdminToken = true) {
   const h = { ...extra };
 
+  // Prefer JSON responses
+  if (!h.Accept && !h.accept) h.Accept = "application/json";
+
   // Force no-cache headers (client-side request)
   if (!h["Cache-Control"] && !h["cache-control"])
     h["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0";
@@ -71,16 +79,17 @@ function makeHeaders(extra = {}, includeAdminToken = true) {
   if (includeAdminToken && ADMIN_TOKEN) {
     h.Authorization = `Bearer ${ADMIN_TOKEN}`;
   }
+
   return h;
 }
 
 async function request(method, path, body, opts = {}) {
   // Enforce correct configuration in production.
-  // Your hosting currently SPA-fallbacks "/api/*" to index.html, so API_BASE must be set.
+  // If your host SPA-fallbacks "/api/*" to index.html, API_BASE must be set to backend origin.
   if (IS_PROD && !API_BASE) {
     throw new Error(
-      "VITE_API_BASE is not set. In production your frontend will serve index.html for /api/* " +
-        "so API calls must target the backend origin (e.g. https://p3d4.onrender.com)."
+      "VITE_API_BASE is not set. In production, /api/* may be served by the frontend (index.html). " +
+        "Set VITE_API_BASE to your backend origin (e.g. https://api.drawnfray.com or https://drawnfray.com)."
     );
   }
 

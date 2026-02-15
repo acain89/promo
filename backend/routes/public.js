@@ -14,6 +14,8 @@ import { STRIPE_SECRET_KEY, NODE_ENV } from "../lib/config.js";
 
 const r = Router();
 
+const DEFAULT_POOL_CONTRIB_CENTS = 455; // keep consistent with your Stripe math ($4.55)
+
 function paymentsEnabled() {
   // "Enabled" means Stripe is configured AND we're running production cookies/cors rules.
   return NODE_ENV === "production" && !!STRIPE_SECRET_KEY;
@@ -57,12 +59,49 @@ function padN(rawOrNum, digits) {
   return d.slice(-digits).padStart(digits, "0");
 }
 
+function clampInt(n, lo, hi) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return null;
+  const i = Math.floor(v);
+  if (i < lo) return lo;
+  if (i > hi) return hi;
+  return i;
+}
+
+/**
+ * Resolve the per-entry contribution used for this contest:
+ * - If locked, that wins (that's what increments prizeCents)
+ * - Else fall back to contest.poolContributionCents (admin-editable field)
+ * - Else default
+ */
+function effectivePoolContributionCents(contest) {
+  const locked = clampInt(contest?.poolContributionCentsLocked, 0, 5000);
+  if (locked != null) return locked;
+
+  const editable = clampInt(contest?.poolContributionCents, 0, 5000);
+  if (editable != null) return editable;
+
+  return DEFAULT_POOL_CONTRIB_CENTS;
+}
+
+/**
+ * Entries eligible for *public counting* (round summary, etc.)
+ * Prefer the authoritative "countedInContest" flag when present.
+ */
 function isPaidEntryEligible(e) {
   if (!e) return false;
   if (!e.paid) return false;
+
   const s = String(e.status || "").toUpperCase();
   if (s === "REFUNDED" || s === "DISPUTED" || s === "EXPIRED") return false;
-  // Only count entries that are actually applied to the contest.
+
+  // If backend is using countedInContest for idempotent contest increments,
+  // use it as the source of truth for whether this entry was applied.
+  if (typeof e.countedInContest === "boolean") {
+    return e.countedInContest === true;
+  }
+
+  // Back-compat behavior:
   if (s === "QUEUED") return false;
   return true;
 }
@@ -80,6 +119,10 @@ r.get("/api/contest", async (req, res) => {
 
     const entryCount = Number(contest.entryCount || 0);
     const totalPaidCents = await getTotalPaidCents();
+
+    const poolContributionCentsLocked = clampInt(contest.poolContributionCentsLocked, 0, 5000);
+    const poolContributionCentsEditable = clampInt(contest.poolContributionCents, 0, 5000);
+    const poolContributionCents = effectivePoolContributionCents(contest);
 
     return res.json({
       ok: true,
@@ -100,6 +143,11 @@ r.get("/api/contest", async (req, res) => {
 
       prizeCents: Number(contest.prizeCents || 0),
       totalPaidCents,
+
+      // ✅ expose contribution fields so admin changes are observable from frontend
+      poolContributionCents, // effective (what would be used if incremented right now)
+      poolContributionCentsLocked: poolContributionCentsLocked ?? null, // locked for this contest
+      poolContributionCentsEditable: poolContributionCentsEditable ?? null, // admin-editable (if you store it)
 
       activatedAt: contest.activatedAt ?? null,
     });
@@ -242,6 +290,11 @@ r.get("/api/reveal-state", async (req, res) => {
             resolvedAt: paid.resolvedAt ?? null,
             targetNumber: paid.targetNumber ?? null,
             prizeCents: Number(paid.prizeCents || 0),
+
+            // optional, but nice for transparency/debugging
+            poolContributionCents: effectivePoolContributionCents(paid),
+            poolContributionCentsLocked:
+              clampInt(paid.poolContributionCentsLocked, 0, 5000) ?? null,
           }
         : {
             id: paidId,
@@ -252,6 +305,8 @@ r.get("/api/reveal-state", async (req, res) => {
             resolvedAt: null,
             targetNumber: null,
             prizeCents: 0,
+            poolContributionCents: DEFAULT_POOL_CONTRIB_CENTS,
+            poolContributionCentsLocked: null,
           },
       paidWinner,
       amoe: amoeState
@@ -339,6 +394,7 @@ r.get("/api/my-entry", requireUser, async (req, res) => {
         type: e.type,
         paid: !!e.paid,
         status: e.status || null,
+        countedInContest: typeof e.countedInContest === "boolean" ? e.countedInContest : undefined,
       },
     });
   } catch (e) {
