@@ -109,7 +109,8 @@ r.post(
       exp: nowMs() + SESSION_TTL_MS,
     });
 
-    setSessionCookie(res, token);
+    // ✅ prefer (req,res,token) so cookie flags are correct behind proxy
+    setSessionCookie(req, res, token);
 
     await auditLog("auth_signup", { userId: userRef.id }, req);
 
@@ -168,7 +169,8 @@ r.post(
       exp: nowMs() + SESSION_TTL_MS,
     });
 
-    setSessionCookie(res, token);
+    // ✅ prefer (req,res,token) so cookie flags are correct behind proxy
+    setSessionCookie(req, res, token);
 
     await auditLog("auth_login", { userId: doc.id }, req);
 
@@ -182,7 +184,10 @@ r.post(
 /** Frontend expects POST /api/auth/logout */
 r.post("/api/auth/logout", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
-  clearSessionCookie(res);
+
+  // ✅ prefer (req,res) so cookie flags match how it was set
+  clearSessionCookie(req, res);
+
   return res.json({ ok: true });
 });
 
@@ -284,7 +289,9 @@ r.post(
       uid: userId,
       exp: nowMs() + SESSION_TTL_MS,
     });
-    setSessionCookie(res, sessToken);
+
+    // ✅ prefer (req,res,token) so cookie flags are correct behind proxy
+    setSessionCookie(req, res, sessToken);
 
     return res.json({ ok: true });
   }

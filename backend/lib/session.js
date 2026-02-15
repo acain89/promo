@@ -14,18 +14,34 @@ function safeEqual(a, b) {
   }
 }
 
-export function setSessionCookie(res, token) {
-  const isProd = NODE_ENV === "production";
+/**
+ * Set session cookie.
+ * Supports both call signatures:
+ *   - setSessionCookie(res, token)            (legacy)
+ *   - setSessionCookie(req, res, token)       (preferred; detects HTTPS via proxy)
+ */
+export function setSessionCookie(a, b, c) {
+  // Determine signature
+  const hasReq = a && typeof a === "object" && a.headers && typeof a.headers === "object";
+  const res = hasReq ? b : a;
+  const token = hasReq ? c : b;
+
+  const maxAge = Math.floor(SESSION_TTL_MS / 1000);
+
+  // Determine HTTPS behind proxy (Render sets x-forwarded-proto=https)
+  const xfProto = String(hasReq ? a.headers["x-forwarded-proto"] : "").toLowerCase();
+  const isHttps = xfProto === "https" || NODE_ENV === "production";
+
   const cookie = [
-    `${SESSION_COOKIE}=${encodeURIComponent(token)}`,
+    `${SESSION_COOKIE}=${encodeURIComponent(String(token || ""))}`,
     "Path=/",
     "HttpOnly",
-    `Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+    `Max-Age=${maxAge}`,
   ];
 
-  // Cross-site cookie needed when frontend+backend are on different domains/origins.
-  // In prod: Secure + SameSite=None is required for modern browsers.
-  if (isProd) {
+  // Cross-site cookie needed when frontend+backend are on different domains.
+  // Use Secure + SameSite=None whenever the request is HTTPS (or prod fallback).
+  if (isHttps) {
     cookie.push("Secure");
     cookie.push("SameSite=None");
   } else {
@@ -35,11 +51,22 @@ export function setSessionCookie(res, token) {
   res.setHeader("Set-Cookie", cookie.join("; "));
 }
 
-export function clearSessionCookie(res) {
-  const isProd = NODE_ENV === "production";
+/**
+ * Clear session cookie.
+ * Supports both call signatures:
+ *   - clearSessionCookie(res)                 (legacy)
+ *   - clearSessionCookie(req, res)            (preferred; detects HTTPS via proxy)
+ */
+export function clearSessionCookie(a, b) {
+  const hasReq = a && typeof a === "object" && a.headers && typeof a.headers === "object";
+  const res = hasReq ? b : a;
+
+  const xfProto = String(hasReq ? a.headers["x-forwarded-proto"] : "").toLowerCase();
+  const isHttps = xfProto === "https" || NODE_ENV === "production";
+
   const cookie = [`${SESSION_COOKIE}=`, "Path=/", "HttpOnly", "Max-Age=0"];
 
-  if (isProd) {
+  if (isHttps) {
     cookie.push("Secure");
     cookie.push("SameSite=None");
   } else {
@@ -85,7 +112,7 @@ export function readSessionToken(token) {
 
 /* =========================================================
    PASSWORD RESET TOKENS
-   - Uses same signing secret as sessions (keeps env simple)
+   - Uses same signing secret as sessions
    - Different "typ" so session tokens can't be used as reset tokens
 ========================================================= */
 
@@ -120,7 +147,6 @@ export function readResetToken(token) {
     return null;
   }
 
-  // must be a reset token
   if (!payload || payload.typ !== "reset") return null;
   if (typeof payload.exp !== "number" || typeof payload.uid !== "string") return null;
   if (nowMs() > payload.exp) return null;

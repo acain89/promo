@@ -57,11 +57,25 @@ function normalizeOrigin(o) {
   return String(o || "").trim().replace(/\/+$/, "");
 }
 
+// Accept common "domain only" forms and make them parseable
+function coerceToOriginUrl(raw) {
+  const s = normalizeOrigin(raw);
+  if (!s) return "";
+  // already has protocol
+  if (s.startsWith("http://") || s.startsWith("https://")) return s;
+  // if it's a bare domain like "drawnfray.com" or "www.drawnfray.com"
+  // assume https in production-like setups
+  return `https://${s}`;
+}
+
 function addWithWwwVariants(set, url) {
-  const u = normalizeOrigin(url);
+  const u0 = normalizeOrigin(url);
+  if (!u0) return;
+
+  const u = coerceToOriginUrl(u0);
   if (!u) return;
 
-  set.add(u);
+  set.add(normalizeOrigin(u));
 
   // If it's an https/http origin, add/remove www variant automatically.
   try {
@@ -74,8 +88,8 @@ function addWithWwwVariants(set, url) {
       const baseUrl = `${parsed.protocol}//${baseHost}${parsed.port ? `:${parsed.port}` : ""}`;
       const wwwUrl = `${parsed.protocol}//${wwwHost}${parsed.port ? `:${parsed.port}` : ""}`;
 
-      set.add(baseUrl);
-      set.add(wwwUrl);
+      set.add(normalizeOrigin(baseUrl));
+      set.add(normalizeOrigin(wwwUrl));
     }
   } catch {
     // ignore invalid URL formats
