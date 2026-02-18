@@ -14,36 +14,23 @@ import { STRIPE_SECRET_KEY, NODE_ENV } from "../lib/config.js";
 
 const r = Router();
 
-const DEFAULT_POOL_CONTRIB_CENTS = 455; // keep consistent with your Stripe math ($4.55)
-
 function paymentsEnabled() {
   // "Enabled" means Stripe is configured AND we're running production cookies/cors rules.
   return NODE_ENV === "production" && !!STRIPE_SECRET_KEY;
 }
 
 function setNoCache(res) {
-  // prevent browser/proxy caching for live state endpoints (timer/prize/pool)
+  // prevent browser/proxy caching for live state endpoints (timer/state)
   res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
   res.setHeader("Pragma", "no-cache");
   res.setHeader("Expires", "0");
-}
-
-async function getTotalPaidCents() {
-  try {
-    const snap = await db().collection("stats").doc("global").get();
-    if (!snap.exists) return 0;
-    const d = snap.data() || {};
-    return Number(d.totalPaidCents || 0);
-  } catch {
-    return 0;
-  }
 }
 
 function onlyDigits(s) {
   return String(s ?? "").replace(/[^\d]/g, "");
 }
 
-// 1000-cell map is always 000–999 indexing (last 3 digits), even if DAILY4 exists.
+// 1000-cell map is always 000–999 indexing (last 3 digits).
 function norm3ToIndex(raw) {
   const d = onlyDigits(raw);
   if (!d) return null;
@@ -59,34 +46,9 @@ function padN(rawOrNum, digits) {
   return d.slice(-digits).padStart(digits, "0");
 }
 
-function clampInt(n, lo, hi) {
-  const v = Number(n);
-  if (!Number.isFinite(v)) return null;
-  const i = Math.floor(v);
-  if (i < lo) return lo;
-  if (i > hi) return hi;
-  return i;
-}
-
 /**
- * Resolve the per-entry contribution used for this contest:
- * - If locked, that wins (that's what increments prizeCents)
- * - Else fall back to contest.poolContributionCents (admin-editable field)
- * - Else default
- */
-function effectivePoolContributionCents(contest) {
-  const locked = clampInt(contest?.poolContributionCentsLocked, 0, 5000);
-  if (locked != null) return locked;
-
-  const editable = clampInt(contest?.poolContributionCents, 0, 5000);
-  if (editable != null) return editable;
-
-  return DEFAULT_POOL_CONTRIB_CENTS;
-}
-
-/**
- * Entries eligible for *public counting* (round summary, etc.)
- * Prefer the authoritative "countedInContest" flag when present.
+ * Entries eligible for counting.
+ * Prefer authoritative "countedInContest" when present.
  */
 function isPaidEntryEligible(e) {
   if (!e) return false;
@@ -95,8 +57,6 @@ function isPaidEntryEligible(e) {
   const s = String(e.status || "").toUpperCase();
   if (s === "REFUNDED" || s === "DISPUTED" || s === "EXPIRED") return false;
 
-  // If backend is using countedInContest for idempotent contest increments,
-  // use it as the source of truth for whether this entry was applied.
   if (typeof e.countedInContest === "boolean") {
     return e.countedInContest === true;
   }
@@ -107,7 +67,7 @@ function isPaidEntryEligible(e) {
 }
 
 /* =========================================================
-   PUBLIC — CONTEST STATE (ACTIVE CONTEST)
+   PUBLIC — CONTEST STATE (ACTIVE CONTEST) — DAILY4 ONLY
 ========================================================= */
 
 r.get("/api/contest", async (req, res) => {
@@ -118,11 +78,16 @@ r.get("/api/contest", async (req, res) => {
     if (!contest) return res.json({ ok: false, serverNow: nowMs() });
 
     const entryCount = Number(contest.entryCount || 0);
-    const totalPaidCents = await getTotalPaidCents();
 
-    const poolContributionCentsLocked = clampInt(contest.poolContributionCentsLocked, 0, 5000);
-    const poolContributionCentsEditable = clampInt(contest.poolContributionCents, 0, 5000);
-    const poolContributionCents = effectivePoolContributionCents(contest);
+    const guaranteedPrizeCents = Number(contest.guaranteedPrizeCents || 0);
+    const bonusPrizeCents = Number(contest.bonusPrizeCents || 0);
+    const finalPrizeCents =
+      Number(contest.finalPrizeCents || 0) || guaranteedPrizeCents + bonusPrizeCents;
+
+    // Landing headline text (lets Admin change copy without a frontend deploy)
+    const prizeHeadline =
+      String(contest.prizeHeadline || contest.headline || "").trim() ||
+      "$100 guaranteed + bonus";
 
     return res.json({
       ok: true,
@@ -131,23 +96,20 @@ r.get("/api/contest", async (req, res) => {
       paymentsEnabled: paymentsEnabled(),
 
       id: contest.id || null,
-      mode: contest.mode || "PICK3",
+      mode: "DAILY4",
       cutoffAt: contest.cutoffAt ?? null,
       endsOn: contest.endsOn ?? null,
       resolved: !!contest.resolved,
       resolvedAt: contest.resolvedAt ?? null,
-      targetNumber: contest.targetNumber ?? null,
 
       entryCount,
       playerCount: entryCount,
 
-      prizeCents: Number(contest.prizeCents || 0),
-      totalPaidCents,
+      guaranteedPrizeCents,
+      bonusPrizeCents,
+      finalPrizeCents,
 
-      // ✅ expose contribution fields so admin changes are observable from frontend
-      poolContributionCents, // effective (what would be used if incremented right now)
-      poolContributionCentsLocked: poolContributionCentsLocked ?? null, // locked for this contest
-      poolContributionCentsEditable: poolContributionCentsEditable ?? null, // admin-editable (if you store it)
+      prizeHeadline,
 
       activatedAt: contest.activatedAt ?? null,
     });
@@ -179,9 +141,7 @@ r.get("/api/round-summary", requireUser, async (req, res) => {
       return res.status(403).json({ error: "Round summary is available after results are posted." });
     }
 
-    const mode = String(contest.mode || "PICK3").toUpperCase();
-    const digits = mode === "DAILY4" ? 4 : 3;
-
+    const digits = 4; // DAILY4 ONLY
     const counts = Array.from({ length: 1000 }, () => 0);
 
     const entriesSnap = await db().collection("entries").doc(contestId).collection("items").get();
@@ -193,7 +153,6 @@ r.get("/api/round-summary", requireUser, async (req, res) => {
       counts[idx] += 1;
     });
 
-    // Winner guess (if winner record exists for this contest)
     const winnerSnap = await db()
       .collection("winners")
       .where("contestId", "==", contestId)
@@ -203,11 +162,13 @@ r.get("/api/round-summary", requireUser, async (req, res) => {
 
     const winner = winnerSnap.empty ? null : winnerSnap.docs[0].data();
 
+    const targetNumber = contest.targetNumber ? padN(contest.targetNumber, digits) : null;
+
     return res.json({
       ok: true,
       contestId,
       digits,
-      targetNumber: contest.targetNumber ? padN(contest.targetNumber, digits) : null,
+      targetNumber,
       winnerGuess: winner?.guess ? padN(winner.guess, digits) : null,
       counts,
     });
@@ -248,7 +209,6 @@ r.get("/api/amoe/winners", async (req, res) => {
 
 /* =========================================================
    PUBLIC — REVEAL STATE (MOST RECENT PAID CONTEST + AMOE)
-   Returns the most recent paid contest (by last cutoff) + latest winner(s).
 ========================================================= */
 
 r.get("/api/reveal-state", async (req, res) => {
@@ -261,7 +221,14 @@ r.get("/api/reveal-state", async (req, res) => {
     const paidSnap = await db().collection("contests").doc(paidId).get();
     const paid = paidSnap.exists ? paidSnap.data() : null;
 
-    const paidWinnerSnap = await db().collection("winners").orderBy("resolvedAt", "desc").limit(1).get();
+    // IMPORTANT: pull winner for THIS contest (not just latest overall)
+    const paidWinnerSnap = await db()
+      .collection("winners")
+      .where("contestId", "==", paidId)
+      .orderBy("resolvedAt", "desc")
+      .limit(1)
+      .get();
+
     const paidWinner = paidWinnerSnap.empty
       ? null
       : { id: paidWinnerSnap.docs[0].id, ...paidWinnerSnap.docs[0].data() };
@@ -274,41 +241,50 @@ r.get("/api/reveal-state", async (req, res) => {
       ? null
       : { id: amoeWinnerSnap.docs[0].id, ...amoeWinnerSnap.docs[0].data() };
 
+    const paidGuaranteed = Number(paid?.guaranteedPrizeCents || 0);
+    const paidBonus = Number(paid?.bonusPrizeCents || 0);
+    const paidFinal = Number(paid?.finalPrizeCents || 0) || paidGuaranteed + paidBonus;
+
     return res.json({
       ok: true,
       serverNow: nowMs(),
-
       paymentsEnabled: paymentsEnabled(),
 
       paid: paid
         ? {
             id: paid.id || paidId,
-            mode: paid.mode || "PICK3",
+            mode: "DAILY4",
             cutoffAt: paid.cutoffAt ?? null,
             endsOn: paid.endsOn ?? null,
             resolved: !!paid.resolved,
             resolvedAt: paid.resolvedAt ?? null,
             targetNumber: paid.targetNumber ?? null,
-            prizeCents: Number(paid.prizeCents || 0),
 
-            // optional, but nice for transparency/debugging
-            poolContributionCents: effectivePoolContributionCents(paid),
-            poolContributionCentsLocked:
-              clampInt(paid.poolContributionCentsLocked, 0, 5000) ?? null,
+            guaranteedPrizeCents: paidGuaranteed,
+            bonusPrizeCents: paidBonus,
+            finalPrizeCents: paidFinal,
+
+            prizeHeadline:
+              String(paid.prizeHeadline || paid.headline || "").trim() || "$100 guaranteed + bonus",
           }
         : {
             id: paidId,
-            mode: "PICK3",
+            mode: "DAILY4",
             cutoffAt: lastCutoff,
             endsOn: mmddyyyyFromCutoffMs(lastCutoff),
             resolved: false,
             resolvedAt: null,
             targetNumber: null,
-            prizeCents: 0,
-            poolContributionCents: DEFAULT_POOL_CONTRIB_CENTS,
-            poolContributionCentsLocked: null,
+
+            guaranteedPrizeCents: 0,
+            bonusPrizeCents: 0,
+            finalPrizeCents: 0,
+
+            prizeHeadline: "$100 guaranteed + bonus",
           },
+
       paidWinner,
+
       amoe: amoeState
         ? {
             cycleId: amoeState.cycleId ?? 1,
@@ -328,6 +304,7 @@ r.get("/api/reveal-state", async (req, res) => {
             targetNumber: null,
             prizeCents: 0,
           },
+
       amoeWinner,
     });
   } catch (e) {
@@ -337,8 +314,6 @@ r.get("/api/reveal-state", async (req, res) => {
 
 /* =========================================================
    MY ENTRY — AUTH REQUIRED
-   - GET /api/my-entry                => active contest entry (existing)
-   - GET /api/my-entry?contestId=...  => entry for a specific contest (Reveal needs this)
 ========================================================= */
 
 r.get("/api/my-entry", requireUser, async (req, res) => {
@@ -347,13 +322,11 @@ r.get("/api/my-entry", requireUser, async (req, res) => {
 
     const qContestId = String(req.query.contestId || "").trim();
 
-    // Default: active contest (existing behavior)
     let contestId = "";
     let contestEndsOn = null;
     let contestActivatedAt = null;
 
     if (qContestId) {
-      // Validate contest exists
       const cSnap = await db().collection("contests").doc(qContestId).get();
       if (!cSnap.exists) return res.status(404).json({ ok: false, error: "No such contest." });
 
@@ -409,7 +382,7 @@ r.get("/api/my-entry", requireUser, async (req, res) => {
 r.post("/api/entry", (req, res) => {
   setNoCache(res);
   return res.status(403).json({
-    error: "AMOE is mail-in only. Mail-in entries are processed manually per the Official Rules.",
+    error: "AMOE is mail-in only. Mail-in entries are processed per the Official Rules.",
   });
 });
 

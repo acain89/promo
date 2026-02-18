@@ -132,6 +132,169 @@ function LoginModal({ open, onClose, onSubmit, err, busy }) {
   );
 }
 
+function WinnerModal({ open, onClose, data }) {
+  if (!open) return null;
+
+  const wr = data?.winnerRecord || null;
+  const pw = data?.projectedWinner || null;
+
+  const un = wr?.winnerUN || data?.best?.winnerUN || pw?.winnerUN || "—";
+  const guess = wr?.guess || data?.best?.guess || pw?.guess || "—";
+  const target = wr?.target || data?.target || pw?.target || "—";
+  const drawLabel = wr?.drawLabel || data?.drawLabel || pw?.drawLabel || "—";
+  const dft = wr?.diff ?? data?.best?.diff ?? pw?.diff ?? "—";
+
+  const prize = wr?.finalPrizeCents != null ? dollarsFromCents(wr.finalPrizeCents) : "—";
+  const playedAt = wr?.playedAt ?? data?.playedAt ?? pw?.playedAt ?? null;
+  const stamp = wr?.resolvedAt ?? data?.serverNow ?? Date.now();
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 99999,
+        display: "grid",
+        placeItems: "center",
+        padding: 18,
+        background: "rgba(0,0,0,0.74)",
+        backdropFilter: "blur(6px)",
+      }}
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose?.();
+      }}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Winner"
+    >
+      <div
+        style={{
+          width: "min(560px, 94vw)",
+          borderRadius: 18,
+          border: "1px solid rgba(255,255,255,0.14)",
+          background: "rgba(15,15,18,0.94)",
+          padding: 16,
+          boxShadow: "0 14px 50px rgba(0,0,0,0.65)",
+          position: "relative",
+          overflow: "hidden",
+        }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div
+          aria-hidden="true"
+          style={{
+            position: "absolute",
+            inset: -40,
+            opacity: 0.18,
+            background:
+              "radial-gradient(circle at 20% 30%, rgba(255,255,255,0.9) 0 2px, transparent 3px) , " +
+              "radial-gradient(circle at 70% 20%, rgba(255,255,255,0.9) 0 2px, transparent 3px) , " +
+              "radial-gradient(circle at 40% 80%, rgba(255,255,255,0.9) 0 2px, transparent 3px) , " +
+              "radial-gradient(circle at 85% 75%, rgba(255,255,255,0.9) 0 2px, transparent 3px)",
+          }}
+        />
+
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
+          <div style={{ display: "grid", gap: 2 }}>
+            <div style={{ fontSize: 10, letterSpacing: "0.18em", textTransform: "uppercase", opacity: 0.75 }}>
+              Exact Match — Winner
+            </div>
+            <div style={{ fontSize: 22, fontWeight: 950 }}>{un}</div>
+          </div>
+
+          <button className="secondary" onClick={onClose} style={{ padding: "8px 10px" }}>
+            Close
+          </button>
+        </div>
+
+        <div
+          style={{
+            marginTop: 12,
+            borderRadius: 14,
+            border: "1px solid rgba(255,255,255,0.12)",
+            background: "rgba(255,255,255,0.03)",
+            padding: "12px 12px",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
+            <div style={{ fontSize: 12, letterSpacing: "0.16em", textTransform: "uppercase", opacity: 0.8 }}>
+              Winning Placard
+            </div>
+            <div style={{ fontSize: 16, fontWeight: 950 }}>{prize}</div>
+          </div>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+              gap: 10,
+              marginTop: 10,
+            }}
+          >
+            <div
+              style={{
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,0.10)",
+                background: "rgba(255,255,255,0.015)",
+                padding: "10px 10px",
+              }}
+            >
+              <div className="label">Entry</div>
+              <div className="value" style={{ letterSpacing: "0.14em", fontVariantNumeric: "tabular-nums" }}>
+                {guess}
+              </div>
+            </div>
+
+            <div
+              style={{
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,0.10)",
+                background: "rgba(255,255,255,0.015)",
+                padding: "10px 10px",
+              }}
+            >
+              <div className="label">Target</div>
+              <div className="value" style={{ fontVariantNumeric: "tabular-nums" }}>
+                {drawLabel} · {target}
+              </div>
+            </div>
+
+            <div
+              style={{
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,0.10)",
+                background: "rgba(255,255,255,0.015)",
+                padding: "10px 10px",
+              }}
+            >
+              <div className="label">DFT</div>
+              <div className="value">{String(dft)}</div>
+            </div>
+
+            <div
+              style={{
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,0.10)",
+                background: "rgba(255,255,255,0.015)",
+                padding: "10px 10px",
+              }}
+            >
+              <div className="label">Timestamp</div>
+              <div className="value">
+                {playedAt ? formatTS(playedAt) : "—"} <span className="miniMuted">•</span> {formatTS(stamp)}
+              </div>
+            </div>
+          </div>
+
+          <div className="miniMuted" style={{ marginTop: 10, textAlign: "center" }}>
+            Winners page should update automatically. If it doesn’t, refresh once.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Admin() {
   const [unlocked, setUnlocked] = useState(false);
   const [status, setStatus] = useState("");
@@ -143,28 +306,24 @@ export default function Admin() {
   const [loginOpen, setLoginOpen] = useState(false);
   const [loginBusy, setLoginBusy] = useState(false);
 
-  // PAID (RESOLVE/PREVIEW operates on LAST contest by design)
-  const [paidTargetRaw, setPaidTargetRaw] = useState("");
-  const [paidPreview, setPaidPreview] = useState(null);
-  const [showPaidPreviewDetails, setShowPaidPreviewDetails] = useState(false);
-
-  // ✅ PAID — POOL CONTRIBUTION CONFIG (per paid entry)
-  const [poolUsdRaw, setPoolUsdRaw] = useState(""); // dollars typed, e.g. "4.55"
-  const [poolDirty, setPoolDirty] = useState(false);
-  const [poolBusy, setPoolBusy] = useState(false);
-  const [poolErr, setPoolErr] = useState("");
-
   // AMOE
   const [amoeName, setAmoeName] = useState("");
   const [amoeEmail, setAmoeEmail] = useState("");
   const [amoeAddress, setAmoeAddress] = useState("");
   const [amoeGuessRaw, setAmoeGuessRaw] = useState("");
 
-  const [amoeTargetRaw, setAmoeTargetRaw] = useState("");
-  const [amoePreview, setAmoePreview] = useState(null);
-  const [showAmoePreviewDetails, setShowAmoePreviewDetails] = useState(false);
+  // Unified targets (1..4)
+  const [t1Raw, setT1Raw] = useState("");
+  const [t2Raw, setT2Raw] = useState("");
+  const [t3Raw, setT3Raw] = useState("");
+  const [t4Raw, setT4Raw] = useState("");
+  const [targetBusy, setTargetBusy] = useState({ 1: false, 2: false, 3: false, 4: false });
 
-  // USER LOOKUP (Paid winner email by UN)
+  // Winner popup (exact match)
+  const [winnerOpen, setWinnerOpen] = useState(false);
+  const [winnerData, setWinnerData] = useState(null);
+
+  // USER LOOKUP
   const [lookupUN, setLookupUN] = useState("");
   const [lookupBusy, setLookupBusy] = useState(false);
   const [lookupErr, setLookupErr] = useState("");
@@ -176,36 +335,30 @@ export default function Admin() {
   const [addPaidRaw, setAddPaidRaw] = useState(""); // dollars typed, e.g. "600"
   const [setPaidRaw, setSetPaidRaw] = useState(""); // dollars typed for absolute set
 
+  // ✅ RESET ALL (paid + AMOE)
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetErr, setResetErr] = useState("");
+
   const active = state?.activeContest || null;
   const last = state?.lastContest || null;
 
   const totalPaidCents = Number(state?.stats?.totalPaidCents || 0);
 
-  // ✅ Pool config values from backend state
-  const poolCfgCents = Number(state?.config?.poolContributionCents);
-  const hasPoolCfg = Number.isFinite(poolCfgCents) && poolCfgCents >= 0;
+  const amoe = state?.amoe || null;
+  const amoeStatus = String(amoe?.status || "COLLECTING");
+  const amoeCount = Number(amoe?.count || 0);
+  const amoePrizeCents = Number(amoe?.prizeCents || 0);
 
-  const activeLockedFromState = Number(state?.config?.activePoolContributionCentsLocked);
-  const activeLockedCents =
-    Number.isFinite(activeLockedFromState) && activeLockedFromState >= 0
-      ? Math.floor(activeLockedFromState)
-      : Number.isFinite(Number(active?.poolContributionCentsLocked)) && Number(active?.poolContributionCentsLocked) >= 0
-        ? Math.floor(Number(active?.poolContributionCentsLocked))
-        : null;
+  const targets = active?.targets && typeof active.targets === "object" ? active.targets : {};
+  const projected = active?.projectedWinner || null;
 
-  // Important: preview/resolve use the *last* contest (same as backend default).
-  function paidDigits() {
-    const mode = String(last?.mode || active?.mode || "PICK3").toUpperCase();
-    return mode === "DAILY4" ? 4 : 3;
-  }
+  // Targets are always DAILY4 now (0000–9999)
+  const t1 = useMemo(() => onlyDigits(t1Raw).slice(0, 4), [t1Raw]);
+  const t2 = useMemo(() => onlyDigits(t2Raw).slice(0, 4), [t2Raw]);
+  const t3 = useMemo(() => onlyDigits(t3Raw).slice(0, 4), [t3Raw]);
+  const t4 = useMemo(() => onlyDigits(t4Raw).slice(0, 4), [t4Raw]);
 
-  const paidTarget = useMemo(() => {
-    const d = paidDigits();
-    return onlyDigits(paidTargetRaw).slice(0, d);
-  }, [paidTargetRaw, last?.mode, active?.mode]);
-
-  const amoeGuess = useMemo(() => onlyDigits(amoeGuessRaw).slice(0, 3), [amoeGuessRaw]);
-  const amoeTarget = useMemo(() => onlyDigits(amoeTargetRaw).slice(0, 3), [amoeTargetRaw]);
+  const amoeGuess = useMemo(() => onlyDigits(amoeGuessRaw).slice(0, 4), [amoeGuessRaw]);
 
   function dollarsToCents(raw) {
     const s = String(raw ?? "").trim();
@@ -214,14 +367,6 @@ export default function Admin() {
     if (!Number.isFinite(n) || n < 0) return null;
     return Math.round(n * 100);
   }
-
-  // ✅ keep the pool USD input synced from backend, unless user is actively editing
-  useEffect(() => {
-    if (!unlocked) return;
-    if (!hasPoolCfg) return;
-    if (poolDirty) return;
-    setPoolUsdRaw(String((poolCfgCents / 100).toFixed(2)));
-  }, [unlocked, hasPoolCfg, poolCfgCents, poolDirty]);
 
   async function adminLoginSubmit(code) {
     const attempt = String(code || "").trim();
@@ -273,139 +418,6 @@ export default function Admin() {
     }
   }
 
-  async function setContestMode(nextMode) {
-    await withBusy(async () => {
-      try {
-        setStatus("");
-        setErr("");
-        await apiPost("/api/admin/mode", { mode: nextMode });
-        setStatus(`Mode set to ${nextMode}.`);
-        await refresh();
-      } catch (e) {
-        setErr(errMsg(e, "Failed to set mode."));
-      }
-    });
-  }
-
-  // ✅ Save pool contribution (per paid entry)
-  async function savePoolContribution() {
-    const cents = dollarsToCents(poolUsdRaw);
-    if (cents == null || poolBusy) return;
-
-    await withBusy(async () => {
-      try {
-        setPoolBusy(true);
-        setPoolErr("");
-        setStatus("");
-        setErr("");
-
-        const confirmText =
-          `Update prize pool contribution per paid entry?\n\n` +
-          `New default: ${dollarsFromCents(cents)}\n\n` +
-          `Note: If the active contest is locked, this applies to future contests only.\n` +
-          `Proceed?`;
-
-        if (!window.confirm(confirmText)) return;
-
-        await apiPost("/api/admin/pool-config/set", { poolContributionCents: cents });
-
-        setPoolDirty(false);
-        setStatus(`Pool contribution set to ${dollarsFromCents(cents)} (default).`);
-        await refresh();
-      } catch (e) {
-        setPoolErr(errMsg(e, "Failed to update pool contribution."));
-      } finally {
-        setPoolBusy(false);
-      }
-    });
-  }
-
-  async function paidDoPreview() {
-    await withBusy(async () => {
-      try {
-        setStatus("");
-        setErr("");
-        setPaidPreview(null);
-        setShowPaidPreviewDetails(false);
-
-        const d = paidDigits();
-        if (paidTarget.length !== d) throw new Error(`Enter exactly ${d} digits for Paid target.`);
-
-        const contestId = String(last?.id || "").trim();
-        const body = contestId ? { targetNumber: paidTarget, contestId } : { targetNumber: paidTarget };
-
-        const r = await apiPost("/api/admin/paid/preview", body);
-        setPaidPreview(r);
-
-        // Autofill lookup box with winner UN (and clear prior lookup result/errors)
-        if (r?.winnerUN) {
-          setLookupUN(String(r.winnerUN));
-          setLookupErr("");
-          setLookupResult(null);
-        }
-
-        setStatus("Paid preview ready (not posted).");
-      } catch (e) {
-        setErr(errMsg(e, "Paid preview failed."));
-      }
-    });
-  }
-
-  async function paidPostResults() {
-    await withBusy(async () => {
-      try {
-        setStatus("");
-        setErr("");
-
-        const d = paidDigits();
-        if (paidTarget.length !== d) throw new Error(`Enter exactly ${d} digits for Paid target.`);
-
-        const contestId = String(last?.id || "").trim();
-
-        const confirmText =
-          `POST PAID RESULTS as ${paidTarget}?\n\n` +
-          `Contest: ${contestId || "(auto)"}\n` +
-          `This action is IRREVERSIBLE.\n` +
-          `Winner: Closest DFT, then earliest timestamp.\n\n` +
-          `Proceed?`;
-
-        if (!window.confirm(confirmText)) return;
-
-        const body = contestId ? { targetNumber: paidTarget, contestId } : { targetNumber: paidTarget };
-        await apiPost("/api/admin/resolve", body);
-
-        setStatus("Paid results posted.");
-        setPaidPreview(null);
-        setShowPaidPreviewDetails(false);
-        await refresh();
-      } catch (e) {
-        setErr(errMsg(e, "Failed to post paid results."));
-      }
-    });
-  }
-
-  async function paidActivateSunday() {
-    await withBusy(async () => {
-      try {
-        setStatus("");
-        setErr("");
-
-        const confirmText =
-          `ACTIVATE current paid contest?\n\n` +
-          `This will apply queued paid entries to the ACTIVE contest (entryCount + prize).\n` +
-          `Proceed?`;
-
-        if (!window.confirm(confirmText)) return;
-
-        await apiPost("/api/admin/paid/activate", {});
-        setStatus("Paid contest activated. Queued entries are now applied.");
-        await refresh();
-      } catch (e) {
-        setErr(errMsg(e, "Failed to activate contest."));
-      }
-    });
-  }
-
   async function exportPaid() {
     await withBusy(async () => {
       try {
@@ -447,7 +459,7 @@ export default function Admin() {
         if (nm.length < 2) throw new Error("AMOE name required.");
         if (!em.includes("@")) throw new Error("AMOE email required.");
         if (ad.length < 6) throw new Error("AMOE address required.");
-        if (amoeGuess.length !== 3) throw new Error("AMOE guess must be 3 digits.");
+        if (amoeGuess.length !== 4) throw new Error("AMOE guess must be 4 digits (0000–9999).");
 
         await apiPost("/api/admin/amoe/add", { name: nm, email: em, address: ad, guess: amoeGuess });
 
@@ -460,68 +472,16 @@ export default function Admin() {
     });
   }
 
-  async function amoeDoPreview() {
-    await withBusy(async () => {
-      try {
-        setStatus("");
-        setErr("");
-        setAmoePreview(null);
-        setShowAmoePreviewDetails(false);
-
-        if (amoeTarget.length !== 3) throw new Error("Enter exactly 3 digits for AMOE target.");
-
-        const r = await apiPost("/api/admin/amoe/preview", { targetNumber: amoeTarget });
-        setAmoePreview(r);
-        setStatus("AMOE preview ready (not posted).");
-      } catch (e) {
-        setErr(errMsg(e, "AMOE preview failed."));
-      }
-    });
-  }
-
-  async function amoeResolve() {
-    await withBusy(async () => {
-      try {
-        setStatus("");
-        setErr("");
-
-        if (amoeTarget.length !== 3) throw new Error("Enter exactly 3 digits for AMOE target.");
-
-        const confirmText =
-          `RESOLVE AMOE as ${amoeTarget}?\n\n` +
-          `This action is IRREVERSIBLE.\n` +
-          `Winner: Closest DFT, then earliest AMOE timestamp.\n\n` +
-          `Proceed?`;
-
-        if (!window.confirm(confirmText)) return;
-
-        await apiPost("/api/admin/amoe/resolve", { targetNumber: amoeTarget });
-        setStatus("AMOE results posted.");
-        setAmoePreview(null);
-        setShowAmoePreviewDetails(false);
-        await refresh();
-      } catch (e) {
-        setErr(errMsg(e, "Failed to resolve AMOE."));
-      }
-    });
-  }
-
   async function amoeResetCycle() {
     await withBusy(async () => {
       try {
         setStatus("");
         setErr("");
 
-        const confirmText =
-          `RESET AMOE CYCLE?\n\n` +
-          `This starts collecting a new AMOE set toward 500.\n` +
-          `Proceed?`;
-
+        const confirmText = `RESET AMOE CYCLE?\n\nThis starts collecting a new AMOE set.\nProceed?`;
         if (!window.confirm(confirmText)) return;
 
         await apiPost("/api/admin/amoe/reset-cycle", {});
-        setAmoePreview(null);
-        setShowAmoePreviewDetails(false);
         setStatus("AMOE cycle reset.");
         await refresh();
       } catch (e) {
@@ -530,8 +490,58 @@ export default function Admin() {
     });
   }
 
+  async function submitTarget(slot, raw) {
+    const target = onlyDigits(raw).slice(0, 4);
+    if (target.length !== 4) {
+      setErr("Target must be exactly 4 digits (0000–9999).");
+      return;
+    }
+
+    if (targetBusy[slot]) return;
+
+    await withBusy(async () => {
+      let didSetBusy = false;
+      try {
+        setStatus("");
+        setErr("");
+
+        const confirmText =
+          `SUBMIT Target #${slot} as ${target}?\n\n` +
+          `This locks that slot.\n` +
+          `System will check ALL entries (Paid + AMOE).\n\n` +
+          `Proceed?`;
+
+        if (!window.confirm(confirmText)) return;
+
+        setTargetBusy((m) => ({ ...m, [slot]: true }));
+        didSetBusy = true;
+
+        const contestId = String(active?.id || "").trim();
+        const body = contestId ? { contestId, slot, targetNumber: target } : { slot, targetNumber: target };
+
+        const r = await apiPost("/api/admin/targets/submit", body);
+
+        // Always refresh state after submit
+        await refresh();
+
+        // Exact match -> show winner popup
+        if (r?.exactHit) {
+          setWinnerData({ ...r, serverNow: Date.now() });
+          setWinnerOpen(true);
+          setStatus("Exact match found. Contest resolved.");
+        } else {
+          setStatus(`Target #${slot} locked. Projected winner updated (if improved).`);
+        }
+      } catch (e) {
+        setErr(errMsg(e, "Target submit failed."));
+      } finally {
+        if (didSetBusy) setTargetBusy((m) => ({ ...m, [slot]: false }));
+      }
+    });
+  }
+
   // User lookup action
-  async function lookupUserEmail() {
+  async function lookupUser() {
     const un = String(lookupUN || "").trim();
     if (!un || lookupBusy) return;
 
@@ -564,10 +574,7 @@ export default function Admin() {
         setErr("");
 
         const confirmText =
-          `ADD to Lifetime Paid Out?\n\n` +
-          `Add: ${dollarsFromCents(addCents)}\n` +
-          `This should match a payout you actually completed.\n\n` +
-          `Proceed?`;
+          `ADD to Lifetime Paid Out?\n\n` + `Add: ${dollarsFromCents(addCents)}\n` + `Proceed?`;
 
         if (!window.confirm(confirmText)) return;
 
@@ -597,7 +604,6 @@ export default function Admin() {
         const confirmText =
           `SET Lifetime Paid Out (ABSOLUTE)?\n\n` +
           `New value: ${dollarsFromCents(totalCents)}\n\n` +
-          `Only use this to correct mistakes.\n` +
           `Type OK to proceed.`;
 
         const ok = window.prompt(confirmText);
@@ -615,19 +621,66 @@ export default function Admin() {
     });
   }
 
-  // Derived (safe) UI values
-  const paidActivated = !!active?.activatedAt;
-  const paidMode = String(active?.mode || "PICK3").toUpperCase();
+  // ✅ RESET ALL (paid + AMOE)
+  async function resetAll() {
+    if (resetBusy) return;
 
-  // Post/preview target should be for the LAST contest (the one you’re resolving).
-  const resolveContestId = String(last?.id || "").trim();
-  const resolveMode = String(last?.mode || "PICK3").toUpperCase();
-  const resolveResolved = !!last?.resolved;
+    await withBusy(async () => {
+      try {
+        setResetBusy(true);
+        setResetErr("");
+        setStatus("");
+        setErr("");
 
-  const amoe = state?.amoe || null;
-  const amoeStatus = String(amoe?.status || "COLLECTING");
-  const amoeCount = Number(amoe?.count || 0);
-  const amoeTargetCount = Number(amoe?.targetCount || 500);
+        const contestId = String(active?.id || "").trim();
+
+        const confirmText =
+          `RESET EVERYTHING?\n\n` +
+          `This will:\n` +
+          `• Delete ALL contest entries (Paid + AMOE mirror)\n` +
+          `• Delete ALL AMOE entries in the current cycle\n` +
+          `• Reset contest state (targets/projection/resolved/entryCount)\n` +
+          `• Advance AMOE cycle (Cycle +1)\n\n` +
+          `Strongly recommended: Export Paid + Export AMOE first.\n\n` +
+          `Type RESET to proceed.`;
+
+        const typed = window.prompt(confirmText);
+        if (String(typed || "").trim().toUpperCase() !== "RESET") return;
+
+        const body = contestId ? { contestId } : {};
+        const r = await apiPost("/api/admin/reset-all", body);
+
+        setStatus(
+          `Reset complete. Deleted contest entries: ${Number(r?.deletedContestEntries || 0)} • Deleted AMOE entries: ${Number(
+            r?.deletedAmoeEntries || 0
+          )} • AMOE Cycle: ${Number(r?.amoePrevCycleId || 0)} → ${Number(r?.amoeNextCycleId || 0)}`
+        );
+
+        // clear local inputs
+        setT1Raw("");
+        setT2Raw("");
+        setT3Raw("");
+        setT4Raw("");
+        setWinnerOpen(false);
+        setWinnerData(null);
+
+        setAmoeName("");
+        setAmoeEmail("");
+        setAmoeAddress("");
+        setAmoeGuessRaw("");
+
+        setLookupUN("");
+        setLookupErr("");
+        setLookupResult(null);
+
+        await refresh();
+      } catch (e) {
+        setResetErr(errMsg(e, "Reset failed."));
+      } finally {
+        setResetBusy(false);
+      }
+    });
+  }
 
   const pageStyle = {
     minHeight: "100svh",
@@ -663,6 +716,13 @@ export default function Admin() {
 
   const compactRow = { display: "flex", justifyContent: "space-between", gap: 10 };
 
+  // Current Game panel values (best-effort)
+  const paidEntryCount = Number(active?.entryCount || 0);
+  const paidEntryPriceUsd = 10;
+  const paidAmountUsd = paidEntryCount * paidEntryPriceUsd;
+
+  const resolved = !!active?.resolved;
+
   if (!unlocked) {
     return (
       <main className="adminPage" style={pageStyle}>
@@ -688,16 +748,13 @@ export default function Admin() {
           ) : null}
         </div>
 
-        <LoginModal
-          open={loginOpen}
-          onClose={() => setLoginOpen(false)}
-          onSubmit={adminLoginSubmit}
-          err={err}
-          busy={loginBusy}
-        />
+        <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} onSubmit={adminLoginSubmit} err={err} busy={loginBusy} />
       </main>
     );
   }
+
+  const slotLocked = (slot) => !!targets?.[String(slot)]?.locked;
+  const slotInfo = (slot) => targets?.[String(slot)] || null;
 
   return (
     <main className="adminPage" style={pageStyle}>
@@ -753,28 +810,123 @@ export default function Admin() {
         </div>
 
         <div style={twoColStyle}>
-          {/* LEFT: PAID */}
+          {/* LEFT: PAID WEEKLY GAME */}
           <section style={panelStyle}>
             <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
               Paid Weekly Game
             </div>
 
-            <div style={{ display: "grid", gap: 8 }}>
+            {/* Daily4-only indicator */}
+            <div
+              style={{
+                padding: "10px 12px",
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,0.10)",
+                background: "rgba(255,255,255,0.01)",
+                marginBottom: 10,
+              }}
+            >
               <div style={compactRow}>
-                <span className="label">Active Mode</span>
-                <span className="value">{paidMode}</span>
+                <span className="label">Mode</span>
+                <span className="value">DAILY4</span>
+              </div>
+              <div className="miniMuted" style={{ marginTop: 6, textAlign: "center" }}>
+                Primary mode is locked to DAILY4.
+              </div>
+            </div>
+
+            {/* Current Game panel */}
+            <div
+              style={{
+                padding: "10px 12px",
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,0.10)",
+                background: "rgba(255,255,255,0.01)",
+              }}
+            >
+              <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
+                Current Game
               </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                <button className="secondary" onClick={() => setContestMode("PICK3")} disabled={busy}>
-                  Set Mode: PICK3
-                </button>
-                <button className="secondary" onClick={() => setContestMode("DAILY4")} disabled={busy}>
-                  Set Mode: DAILY4 (Hidden)
-                </button>
+              <div style={{ display: "grid", gap: 6 }}>
+                <div style={compactRow}>
+                  <span className="label">Paid Entries</span>
+                  <span className="value">{Number.isFinite(paidEntryCount) ? paidEntryCount : 0}</span>
+                </div>
+
+                <div style={compactRow}>
+                  <span className="label">Dollar Amount</span>
+                  <span className="value">${Number.isFinite(paidAmountUsd) ? paidAmountUsd.toLocaleString("en-US") : "0"}</span>
+                </div>
+
+                <div style={compactRow}>
+                  <span className="label">Today</span>
+                  <span className="value">{new Date().toLocaleDateString()}</span>
+                </div>
+
+                <div style={compactRow}>
+                  <span className="label">Game Ending On</span>
+                  <span className="value">{active?.endsOn || "—"}</span>
+                </div>
+
+                <div style={compactRow}>
+                  <span className="label">Server Time</span>
+                  <span className="value">{formatTS(state?.serverNow || null)}</span>
+                </div>
+
+                <div style={compactRow}>
+                  <span className="label">Resolved</span>
+                  <span className="value">{resolved ? "YES" : "NO"}</span>
+                </div>
               </div>
 
-              {/* ✅ POOL CONTRIBUTION CONFIG CARD */}
+              {projected ? (
+                <div
+                  style={{
+                    marginTop: 10,
+                    paddingTop: 10,
+                    borderTop: "1px solid rgba(255,255,255,0.08)",
+                    display: "grid",
+                    gap: 6,
+                  }}
+                >
+                  <div className="label" style={{ textAlign: "center" }}>
+                    Projected Winner (Best DFT So Far)
+                  </div>
+
+                  <div style={compactRow}>
+                    <span className="label">UN</span>
+                    <span className="value">{projected?.winnerUN || "—"}</span>
+                  </div>
+
+                  <div style={compactRow}>
+                    <span className="label">Entry • DFT</span>
+                    <span className="value">
+                      {projected?.guess || "—"} • {String(projected?.diff ?? "—")}
+                    </span>
+                  </div>
+
+                  <div style={compactRow}>
+                    <span className="label">Target</span>
+                    <span className="value">
+                      {projected?.drawLabel || "—"} · {projected?.target || "—"}
+                    </span>
+                  </div>
+
+                  <div style={compactRow}>
+                    <span className="label">Entry TS</span>
+                    <span className="value">{formatTS(projected?.entryTimestamp || null)}</span>
+                  </div>
+
+                  <div className="miniMuted" style={{ textAlign: "center" }}>
+                    Tie rule enforced: same DFT keeps the earlier timestamp.
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            {/* Resolve Targets (Unified) */}
+            <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
               <div
                 style={{
                   padding: "10px 12px",
@@ -784,61 +936,261 @@ export default function Admin() {
                 }}
               >
                 <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
-                  Prize Pool Contribution (Per Paid Entry)
+                  Resolve Targets (4 Draws)
+                </div>
+
+                <div className="miniMuted" style={{ textAlign: "center", marginBottom: 10 }}>
+                  Submit targets one at a time. Each slot locks after submit. System checks Paid + AMOE.
+                </div>
+
+                {/* Slot 1 */}
+                <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+                  <div style={compactRow}>
+                    <span className="label">Target #1</span>
+                    <span className="value">{slotLocked(1) ? "LOCKED" : "OPEN"}</span>
+                  </div>
+
+                  <input
+                    className="field"
+                    type="text"
+                    inputMode="numeric"
+                    placeholder="0000–9999"
+                    value={t1}
+                    onChange={(e) => setT1Raw(e.target.value)}
+                    disabled={busy || slotLocked(1) || resolved}
+                  />
+
+                  <button
+                    className="primary"
+                    onClick={() => submitTarget(1, t1)}
+                    disabled={busy || resolved || slotLocked(1) || t1.length !== 4 || targetBusy[1]}
+                  >
+                    {targetBusy[1] ? "Submitting…" : "Submit Target #1 (Locks Slot)"}
+                  </button>
+
+                  {slotLocked(1) ? (
+                    <div className="miniMuted" style={{ textAlign: "center" }}>
+                      {slotInfo(1)?.drawLabel || "—"} · {slotInfo(1)?.target || "—"} • {formatTS(slotInfo(1)?.playedAt || null)}
+                    </div>
+                  ) : null}
+                </div>
+
+                {/* Slot 2 */}
+                <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+                  <div style={compactRow}>
+                    <span className="label">Target #2</span>
+                    <span className="value">{slotLocked(2) ? "LOCKED" : "OPEN"}</span>
+                  </div>
+
+                  <input
+                    className="field"
+                    type="text"
+                    inputMode="numeric"
+                    placeholder="0000–9999"
+                    value={t2}
+                    onChange={(e) => setT2Raw(e.target.value)}
+                    disabled={busy || slotLocked(2) || resolved}
+                  />
+
+                  <button
+                    className="secondary"
+                    onClick={() => submitTarget(2, t2)}
+                    disabled={busy || resolved || slotLocked(2) || t2.length !== 4 || targetBusy[2]}
+                  >
+                    {targetBusy[2] ? "Submitting…" : "Submit Target #2 (Locks Slot)"}
+                  </button>
+
+                  {slotLocked(2) ? (
+                    <div className="miniMuted" style={{ textAlign: "center" }}>
+                      {slotInfo(2)?.drawLabel || "—"} · {slotInfo(2)?.target || "—"} • {formatTS(slotInfo(2)?.playedAt || null)}
+                    </div>
+                  ) : null}
+                </div>
+
+                {/* Slot 3 */}
+                <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+                  <div style={compactRow}>
+                    <span className="label">Target #3</span>
+                    <span className="value">{slotLocked(3) ? "LOCKED" : "OPEN"}</span>
+                  </div>
+
+                  <input
+                    className="field"
+                    type="text"
+                    inputMode="numeric"
+                    placeholder="0000–9999"
+                    value={t3}
+                    onChange={(e) => setT3Raw(e.target.value)}
+                    disabled={busy || slotLocked(3) || resolved}
+                  />
+
+                  <button
+                    className="secondary"
+                    onClick={() => submitTarget(3, t3)}
+                    disabled={busy || resolved || slotLocked(3) || t3.length !== 4 || targetBusy[3]}
+                  >
+                    {targetBusy[3] ? "Submitting…" : "Submit Target #3 (Locks Slot)"}
+                  </button>
+
+                  {slotLocked(3) ? (
+                    <div className="miniMuted" style={{ textAlign: "center" }}>
+                      {slotInfo(3)?.drawLabel || "—"} · {slotInfo(3)?.target || "—"} • {formatTS(slotInfo(3)?.playedAt || null)}
+                    </div>
+                  ) : null}
+                </div>
+
+                {/* Slot 4 */}
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={compactRow}>
+                    <span className="label">Target #4</span>
+                    <span className="value">{slotLocked(4) ? "LOCKED" : "OPEN"}</span>
+                  </div>
+
+                  <input
+                    className="field"
+                    type="text"
+                    inputMode="numeric"
+                    placeholder="0000–9999"
+                    value={t4}
+                    onChange={(e) => setT4Raw(e.target.value)}
+                    disabled={busy || slotLocked(4) || resolved}
+                  />
+
+                  <button
+                    className="secondary"
+                    onClick={() => submitTarget(4, t4)}
+                    disabled={busy || resolved || slotLocked(4) || t4.length !== 4 || targetBusy[4]}
+                  >
+                    {targetBusy[4] ? "Submitting…" : "Submit Target #4 (Locks Slot)"}
+                  </button>
+
+                  {slotLocked(4) ? (
+                    <div className="miniMuted" style={{ textAlign: "center" }}>
+                      {slotInfo(4)?.drawLabel || "—"} · {slotInfo(4)?.target || "—"} • {formatTS(slotInfo(4)?.playedAt || null)}
+                    </div>
+                  ) : null}
+                </div>
+
+                {resolved ? (
+                  <div
+                    style={{
+                      marginTop: 10,
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                      border: "1px solid rgba(201,75,75,0.45)",
+                      background: "rgba(201,75,75,0.10)",
+                      textAlign: "center",
+                      fontSize: 13,
+                    }}
+                  >
+                    Contest is resolved. Targets are locked.
+                  </div>
+                ) : null}
+              </div>
+
+              {/* Exports */}
+              <button className="secondary" onClick={exportPaid} disabled={busy}>
+                Export Paid Summary (JSON)
+              </button>
+
+              {/* ✅ RESET EVERYTHING (paid + AMOE) */}
+              <div
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "1px solid rgba(201,75,75,0.45)",
+                  background: "rgba(201,75,75,0.06)",
+                }}
+              >
+                <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
+                  Reset Everything (Paid + AMOE)
+                </div>
+
+                <div className="miniMuted" style={{ textAlign: "center" }}>
+                  This wipes entries and resets contest state. Export first.
+                </div>
+
+                <button
+                  className="secondary"
+                  onClick={resetAll}
+                  style={{ marginTop: 10, width: "100%", borderColor: "rgba(201,75,75,0.55)" }}
+                  disabled={busy || resetBusy}
+                >
+                  {resetBusy ? "Resetting…" : "Reset All (Type RESET)"}
+                </button>
+
+                {resetErr ? <div style={{ color: "#ffb2b2", fontSize: 13, marginTop: 8 }}>{resetErr}</div> : null}
+              </div>
+
+              {/* ✅ LIFETIME PAID OUT (MANUAL) */}
+              <div
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "1px solid rgba(255,255,255,0.10)",
+                  background: "rgba(255,255,255,0.01)",
+                }}
+              >
+                <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
+                  Lifetime Paid Out (Manual)
                 </div>
 
                 <div style={{ display: "grid", gap: 6 }}>
                   <div style={compactRow}>
-                    <span className="label">Default (Config)</span>
-                    <span className="value">{hasPoolCfg ? dollarsFromCents(poolCfgCents) : "—"}</span>
-                  </div>
-
-                  <div style={compactRow}>
-                    <span className="label">Active Locked</span>
-                    <span className="value">{activeLockedCents != null ? dollarsFromCents(activeLockedCents) : "—"}</span>
+                    <span className="label">Current Total</span>
+                    <span className="value">{dollarsFromCents(totalPaidCents)}</span>
                   </div>
 
                   <div className="miniMuted" style={{ textAlign: "center" }}>
-                    Change the default anytime. If “Active Locked” is set, changes apply to future contests only.
+                    Update this after you actually pay winners via your processor.
                   </div>
 
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, marginTop: 6 }}>
+                  <div style={{ display: "grid", gap: 8, marginTop: 6 }}>
                     <input
                       className="field"
                       inputMode="decimal"
-                      placeholder="e.g. 4.55"
-                      value={poolUsdRaw}
-                      onChange={(e) => {
-                        setPoolUsdRaw(e.target.value);
-                        setPoolDirty(true);
-                        setPoolErr("");
-                      }}
-                      disabled={busy || poolBusy}
+                      placeholder="Add amount (USD) e.g. 600"
+                      value={addPaidRaw}
+                      onChange={(e) => setAddPaidRaw(e.target.value)}
+                      disabled={busy || totalPaidBusy}
                       onKeyDown={(e) => {
-                        if (e.key === "Enter") savePoolContribution();
+                        if (e.key === "Enter") totalPaidAdd();
+                      }}
+                    />
+
+                    <button className="secondary" onClick={totalPaidAdd} disabled={busy || totalPaidBusy || dollarsToCents(addPaidRaw) == null}>
+                      {totalPaidBusy ? "Updating…" : "Add to Total Paid Out"}
+                    </button>
+
+                    <div style={{ height: 1, background: "rgba(255,255,255,0.08)" }} />
+
+                    <input
+                      className="field"
+                      inputMode="decimal"
+                      placeholder="Set absolute total (USD) e.g. 1200"
+                      value={setPaidRaw}
+                      onChange={(e) => setSetPaidRaw(e.target.value)}
+                      disabled={busy || totalPaidBusy}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") totalPaidSetAbsolute();
                       }}
                     />
 
                     <button
                       className="secondary"
-                      onClick={savePoolContribution}
-                      disabled={busy || poolBusy || dollarsToCents(poolUsdRaw) == null}
-                      style={{ padding: "10px 12px" }}
+                      onClick={totalPaidSetAbsolute}
+                      style={{ borderColor: "rgba(201,75,75,0.45)" }}
+                      disabled={busy || totalPaidBusy || dollarsToCents(setPaidRaw) == null}
                     >
-                      {poolBusy ? "Saving…" : "Save"}
+                      {totalPaidBusy ? "Updating…" : "Set Total Paid Out (Danger)"}
                     </button>
+
+                    {totalPaidErr ? <div style={{ color: "#ffb2b2", fontSize: 13 }}>{totalPaidErr}</div> : null}
                   </div>
-
-                  {!poolDirty && hasPoolCfg ? (
-                    <div className="miniMuted" style={{ textAlign: "center" }}>
-                      Tip: type a new value (USD), then Save.
-                    </div>
-                  ) : null}
-
-                  {poolErr ? <div style={{ color: "#ffb2b2", fontSize: 13, textAlign: "center" }}>{poolErr}</div> : null}
                 </div>
               </div>
 
+              {/* USER LOOKUP */}
               <div
                 style={{
                   padding: "10px 12px",
@@ -848,309 +1200,47 @@ export default function Admin() {
                 }}
               >
                 <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
-                  Resolve Target Applies To (Last Contest)
+                  User Lookup (Email + Phone by UN)
                 </div>
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={compactRow}>
-                    <span className="label">Contest ID</span>
-                    <span className="value">{resolveContestId || "—"}</span>
-                  </div>
-                  <div style={compactRow}>
-                    <span className="label">Mode</span>
-                    <span className="value">{resolveMode}</span>
-                  </div>
-                  <div style={compactRow}>
-                    <span className="label">Ends On</span>
-                    <span className="value">{last?.endsOn || "—"}</span>
-                  </div>
-                  <div style={compactRow}>
-                    <span className="label">Resolved</span>
-                    <span className="value">{resolveResolved ? "YES" : "NO"}</span>
-                  </div>
-                </div>
-              </div>
-
-              <div style={{ display: "grid", gap: 6 }}>
-                <label className="fieldLabel" style={{ marginTop: 2 }}>
-                  Paid Target Number
-                </label>
-                <input
-                  className="field"
-                  type="text"
-                  inputMode="numeric"
-                  placeholder={paidDigits() === 4 ? "0000–9999" : "000–999"}
-                  value={paidTarget}
-                  onChange={(e) => setPaidTargetRaw(e.target.value)}
-                  disabled={busy}
-                />
-
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  <button className="secondary" onClick={paidDoPreview} disabled={busy || paidTarget.length !== paidDigits()}>
-                    Preview Winner
-                  </button>
-                  <button
-                    className="primary"
-                    onClick={paidPostResults}
-                    disabled={busy || paidTarget.length !== paidDigits() || resolveResolved}
-                  >
-                    Post Paid Results (Irreversible)
-                  </button>
-                </div>
-
-                {paidPreview ? (
-                  <div
-                    style={{
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      border: "1px solid rgba(255,255,255,0.10)",
-                      background: "rgba(255,255,255,0.01)",
-                    }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-                      <div className="label">Paid Preview</div>
-                      <button
-                        className="secondary"
-                        onClick={() => setShowPaidPreviewDetails((v) => !v)}
-                        style={{ padding: "8px 10px" }}
-                        disabled={busy}
-                      >
-                        {showPaidPreviewDetails ? "Hide" : "Details"}
-                      </button>
-                    </div>
-
-                    <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
-                      <div style={compactRow}>
-                        <span className="label">Winner</span>
-                        <span className="value">{paidPreview.winnerUN}</span>
-                      </div>
-                      <div style={compactRow}>
-                        <span className="label">Guess • DFT</span>
-                        <span className="value">
-                          {paidPreview.guess} • {paidPreview.diff}
-                        </span>
-                      </div>
-                      <div style={compactRow}>
-                        <span className="label">Eligible / Total</span>
-                        <span className="value">
-                          {paidPreview.eligibleCount} / {paidPreview.totalEntries}
-                        </span>
-                      </div>
-
-                      {showPaidPreviewDetails ? (
-                        <>
-                          <div style={compactRow}>
-                            <span className="label">Target</span>
-                            <span className="value">{paidPreview.target}</span>
-                          </div>
-                          <div style={compactRow}>
-                            <span className="label">Timestamp</span>
-                            <span className="value">{formatTS(paidPreview.entryTimestamp)}</span>
-                          </div>
-                          <div style={compactRow}>
-                            <span className="label">Prize</span>
-                            <span className="value">{dollarsFromCents(paidPreview.prizeCents || 0)}</span>
-                          </div>
-                        </>
-                      ) : null}
-                    </div>
-                  </div>
-                ) : null}
 
                 <div style={{ display: "grid", gap: 8 }}>
-                  {/* ✅ LIFETIME PAID OUT (MANUAL) */}
-                  <div
-                    style={{
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      border: "1px solid rgba(255,255,255,0.10)",
-                      background: "rgba(255,255,255,0.01)",
+                  <input
+                    className="field"
+                    placeholder="Enter UN (username)"
+                    value={lookupUN}
+                    onChange={(e) => setLookupUN(e.target.value)}
+                    disabled={busy || lookupBusy}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") lookupUser();
                     }}
-                  >
-                    <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
-                      Lifetime Paid Out (Manual)
-                    </div>
+                  />
 
+                  <button className="secondary" onClick={lookupUser} disabled={busy || lookupBusy || !String(lookupUN || "").trim()}>
+                    {lookupBusy ? "Searching…" : "Search"}
+                  </button>
+
+                  {lookupErr ? <div style={{ color: "#ffb2b2", fontSize: 13 }}>{lookupErr}</div> : null}
+
+                  {lookupResult ? (
                     <div style={{ display: "grid", gap: 6 }}>
                       <div style={compactRow}>
-                        <span className="label">Current Total</span>
-                        <span className="value">{dollarsFromCents(totalPaidCents)}</span>
+                        <span className="label">UN</span>
+                        <span className="value">{lookupResult.username || "—"}</span>
                       </div>
-
-                      <div className="miniMuted" style={{ textAlign: "center" }}>
-                        Update this after you actually pay winners via your 3rd-party processor.
+                      <div style={compactRow}>
+                        <span className="label">Email</span>
+                        <span className="value">{lookupResult.email || "—"}</span>
                       </div>
-
-                      <div style={{ display: "grid", gap: 8, marginTop: 6 }}>
-                        <input
-                          className="field"
-                          inputMode="decimal"
-                          placeholder="Add amount (USD) e.g. 600"
-                          value={addPaidRaw}
-                          onChange={(e) => setAddPaidRaw(e.target.value)}
-                          disabled={busy || totalPaidBusy}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") totalPaidAdd();
-                          }}
-                        />
-
-                        <button
-                          className="secondary"
-                          onClick={totalPaidAdd}
-                          disabled={busy || totalPaidBusy || dollarsToCents(addPaidRaw) == null}
-                        >
-                          {totalPaidBusy ? "Updating…" : "Add to Total Paid Out"}
-                        </button>
-
-                        <div style={{ height: 1, background: "rgba(255,255,255,0.08)" }} />
-
-                        <input
-                          className="field"
-                          inputMode="decimal"
-                          placeholder="Set absolute total (USD) e.g. 1200"
-                          value={setPaidRaw}
-                          onChange={(e) => setSetPaidRaw(e.target.value)}
-                          disabled={busy || totalPaidBusy}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") totalPaidSetAbsolute();
-                          }}
-                        />
-
-                        <button
-                          className="secondary"
-                          onClick={totalPaidSetAbsolute}
-                          style={{ borderColor: "rgba(201,75,75,0.45)" }}
-                          disabled={busy || totalPaidBusy || dollarsToCents(setPaidRaw) == null}
-                        >
-                          {totalPaidBusy ? "Updating…" : "Set Total Paid Out (Danger)"}
-                        </button>
-
-                        {totalPaidErr ? <div style={{ color: "#ffb2b2", fontSize: 13 }}>{totalPaidErr}</div> : null}
+                      <div style={compactRow}>
+                        <span className="label">Phone</span>
+                        <span className="value">{lookupResult.phone || "—"}</span>
                       </div>
                     </div>
-                  </div>
-
-                  <button
-                    className="secondary"
-                    onClick={paidActivateSunday}
-                    style={{ borderColor: "rgba(201,75,75,0.45)" }}
-                    disabled={busy}
-                  >
-                    Sunday Reset Action: Activate Current Contest (Apply Queued)
-                  </button>
-
-                  <button className="secondary" onClick={exportPaid} disabled={busy}>
-                    Export Paid Summary (JSON)
-                  </button>
-
-                  <div
-                    style={{
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      border: "1px solid rgba(255,255,255,0.10)",
-                      background: "rgba(255,255,255,0.01)",
-                    }}
-                  >
-                    <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
-                      Operational Snapshot (Active)
+                  ) : (
+                    <div className="miniMuted" style={{ textAlign: "center" }}>
+                      Use this to quickly retrieve contact info.
                     </div>
-
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                      <div style={{ display: "grid", gap: 6 }}>
-                        <div style={compactRow}>
-                          <span className="label">Server</span>
-                          <span className="value">{formatTS(state?.serverNow || null)}</span>
-                        </div>
-
-                        <div style={compactRow}>
-                          <span className="label">Active</span>
-                          <span className="value">{active?.endsOn || "—"}</span>
-                        </div>
-
-                        <div style={compactRow}>
-                          <span className="label">Cutoff</span>
-                          <span className="value">{formatTS(active?.cutoffAt || null)}</span>
-                        </div>
-
-                        <div style={compactRow}>
-                          <span className="label">Visible Prize</span>
-                          <span className="value">
-                            {dollarsFromCents(active?.prizeCents || 0)} ({Number(active?.entryCount || 0)})
-                            {!paidActivated ? " *" : ""}
-                          </span>
-                        </div>
-                      </div>
-
-                      <div style={{ display: "grid", gap: 6 }}>
-                        <div style={compactRow}>
-                          <span className="label">Queued (Paid)</span>
-                          <span className="value">
-                            {Number(state?.paid?.queuedCount || 0)} •{" "}
-                            {dollarsFromCents(Number(state?.paid?.queuedPrizeCents || 0))}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-
-                    {!paidActivated ? (
-                      <div className="miniMuted" style={{ marginTop: 8, textAlign: "center" }}>
-                        * Paid prize shown is not activated yet (queued not applied).
-                      </div>
-                    ) : null}
-                  </div>
-
-                  {/* USER LOOKUP CARD (Paid winners email by UN) */}
-                  <div
-                    style={{
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      border: "1px solid rgba(255,255,255,0.10)",
-                      background: "rgba(255,255,255,0.01)",
-                    }}
-                  >
-                    <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
-                      User Lookup (Email by UN)
-                    </div>
-
-                    <div style={{ display: "grid", gap: 8 }}>
-                      <input
-                        className="field"
-                        placeholder="Enter UN (username)"
-                        value={lookupUN}
-                        onChange={(e) => setLookupUN(e.target.value)}
-                        disabled={busy || lookupBusy}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") lookupUserEmail();
-                        }}
-                      />
-
-                      <button
-                        className="secondary"
-                        onClick={lookupUserEmail}
-                        disabled={busy || lookupBusy || !String(lookupUN || "").trim()}
-                      >
-                        {lookupBusy ? "Searching…" : "Search"}
-                      </button>
-
-                      {lookupErr ? <div style={{ color: "#ffb2b2", fontSize: 13 }}>{lookupErr}</div> : null}
-
-                      {lookupResult ? (
-                        <div style={{ display: "grid", gap: 6 }}>
-                          <div style={compactRow}>
-                            <span className="label">UN</span>
-                            <span className="value">{lookupResult.username || "—"}</span>
-                          </div>
-                          <div style={compactRow}>
-                            <span className="label">Email</span>
-                            <span className="value">{lookupResult.email || "—"}</span>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="miniMuted" style={{ textAlign: "center" }}>
-                          Use this after results post to quickly find the winner’s email.
-                        </div>
-                      )}
-                    </div>
-                  </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -1159,7 +1249,7 @@ export default function Admin() {
           {/* RIGHT: AMOE */}
           <section style={panelStyle}>
             <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
-              AMOE Pool (Separate Game)
+              AMOE
             </div>
 
             <div style={{ display: "grid", gap: 8 }}>
@@ -1169,13 +1259,11 @@ export default function Admin() {
               </div>
               <div style={compactRow}>
                 <span className="label">Count</span>
-                <span className="value">
-                  {amoeCount} / {amoeTargetCount}
-                </span>
+                <span className="value">{amoeCount}</span>
               </div>
               <div style={compactRow}>
                 <span className="label">Prize</span>
-                <span className="value">{dollarsFromCents(amoe?.prizeCents || 0)}</span>
+                <span className="value">{dollarsFromCents(amoePrizeCents)}</span>
               </div>
 
               <div style={{ marginTop: 4, display: "grid", gap: 6 }}>
@@ -1183,148 +1271,40 @@ export default function Admin() {
                   Add AMOE Entry (Manual)
                 </div>
 
-                <input
-                  className="field"
-                  placeholder="Full legal name"
-                  value={amoeName}
-                  onChange={(e) => setAmoeName(e.target.value)}
-                  disabled={busy}
-                />
-                <input
-                  className="field"
-                  placeholder="Email"
-                  value={amoeEmail}
-                  onChange={(e) => setAmoeEmail(e.target.value)}
-                  disabled={busy}
-                />
-                <input
-                  className="field"
-                  placeholder="Mailing address"
-                  value={amoeAddress}
-                  onChange={(e) => setAmoeAddress(e.target.value)}
-                  disabled={busy}
-                />
+                <input className="field" placeholder="Full legal name" value={amoeName} onChange={(e) => setAmoeName(e.target.value)} disabled={busy} />
+                <input className="field" placeholder="Email" value={amoeEmail} onChange={(e) => setAmoeEmail(e.target.value)} disabled={busy} />
+                <input className="field" placeholder="Mailing address" value={amoeAddress} onChange={(e) => setAmoeAddress(e.target.value)} disabled={busy} />
                 <input
                   className="field"
                   type="text"
                   inputMode="numeric"
-                  placeholder="AMOE guess (000–999)"
+                  placeholder="AMOE guess (0000–9999)"
                   value={amoeGuess}
                   onChange={(e) => setAmoeGuessRaw(e.target.value)}
                   disabled={busy}
                 />
 
-                <button
-                  className="primary"
-                  onClick={amoeAdd}
-                  disabled={busy || amoeStatus !== "COLLECTING" || amoeGuess.length !== 3}
-                >
+                <button className="primary" onClick={amoeAdd} disabled={busy || amoeGuess.length !== 4}>
                   Add AMOE Entry
                 </button>
+
+                <div className="miniMuted" style={{ textAlign: "center" }}>
+                  AMOE entries are checked by the same 4 targets (Paid + AMOE together).
+                </div>
               </div>
 
-              <div style={{ marginTop: 6, display: "grid", gap: 6 }}>
-                <div className="label" style={{ textAlign: "center" }}>
-                  Resolve AMOE (when READY)
-                </div>
-
-                <input
-                  className="field"
-                  type="text"
-                  inputMode="numeric"
-                  placeholder="AMOE target (Pick3 result)"
-                  value={amoeTarget}
-                  onChange={(e) => setAmoeTargetRaw(e.target.value)}
-                  disabled={busy || amoeStatus !== "READY"}
-                />
-
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  <button
-                    className="secondary"
-                    onClick={amoeDoPreview}
-                    disabled={busy || amoeStatus !== "READY" || amoeTarget.length !== 3}
-                  >
-                    Preview AMOE Winner
-                  </button>
-                  <button
-                    className="primary"
-                    onClick={amoeResolve}
-                    disabled={busy || amoeStatus !== "READY" || amoeTarget.length !== 3}
-                  >
-                    Post AMOE Results (Irreversible)
-                  </button>
-                </div>
-
-                {amoePreview ? (
-                  <div
-                    style={{
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      border: "1px solid rgba(255,255,255,0.10)",
-                      background: "rgba(255,255,255,0.01)",
-                    }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-                      <div className="label">AMOE Preview</div>
-                      <button
-                        className="secondary"
-                        onClick={() => setShowAmoePreviewDetails((v) => !v)}
-                        style={{ padding: "8px 10px" }}
-                        disabled={busy}
-                      >
-                        {showAmoePreviewDetails ? "Hide" : "Details"}
-                      </button>
-                    </div>
-
-                    <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
-                      <div style={compactRow}>
-                        <span className="label">Winner</span>
-                        <span className="value">{amoePreview.winnerName}</span>
-                      </div>
-                      <div style={compactRow}>
-                        <span className="label">Guess • DFT</span>
-                        <span className="value">
-                          {amoePreview.guess} • {amoePreview.diff}
-                        </span>
-                      </div>
-                      <div style={compactRow}>
-                        <span className="label">Entries</span>
-                        <span className="value">{amoePreview.entryCount}</span>
-                      </div>
-
-                      {showAmoePreviewDetails ? (
-                        <>
-                          <div style={compactRow}>
-                            <span className="label">Target</span>
-                            <span className="value">{amoePreview.target}</span>
-                          </div>
-                          <div style={compactRow}>
-                            <span className="label">Email</span>
-                            <span className="value">{amoePreview.winnerEmail}</span>
-                          </div>
-                          <div style={compactRow}>
-                            <span className="label">Timestamp</span>
-                            <span className="value">{formatTS(amoePreview.entryTimestamp)}</span>
-                          </div>
-                        </>
-                      ) : null}
-                    </div>
-                  </div>
-                ) : null}
-
-                <div style={{ display: "grid", gap: 8, marginTop: 6 }}>
-                  <button className="secondary" onClick={exportAmoe} disabled={busy}>
-                    Export AMOE Summary (JSON)
-                  </button>
-                  <button
-                    className="secondary"
-                    onClick={amoeResetCycle}
-                    style={{ borderColor: "rgba(201,75,75,0.45)" }}
-                    disabled={busy}
-                  >
-                    Reset AMOE Cycle (Start New Collection)
-                  </button>
-                </div>
+              <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+                <button className="secondary" onClick={exportAmoe} disabled={busy}>
+                  Export AMOE Summary (JSON)
+                </button>
+                <button
+                  className="secondary"
+                  onClick={amoeResetCycle}
+                  style={{ borderColor: "rgba(201,75,75,0.45)" }}
+                  disabled={busy}
+                >
+                  Reset AMOE Cycle (Start New Collection)
+                </button>
               </div>
             </div>
           </section>
@@ -1346,6 +1326,15 @@ export default function Admin() {
             Working…
           </p>
         ) : null}
+
+        <WinnerModal
+          open={winnerOpen}
+          onClose={() => {
+            setWinnerOpen(false);
+            setWinnerData(null);
+          }}
+          data={winnerData}
+        />
       </div>
     </main>
   );

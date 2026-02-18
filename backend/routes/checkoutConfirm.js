@@ -9,56 +9,14 @@ import { nowMs } from "../lib/utils.js";
 
 const r = Router();
 
-// Keep ONE default here (match your business math)
-const DEFAULT_POOL_CONTRIB_CENTS = 455; // $4.55
-
-function clampInt(n, lo, hi) {
-  const v = Number(n);
-  if (!Number.isFinite(v)) return null;
-  const i = Math.floor(v);
-  if (i < lo) return lo;
-  if (i > hi) return hi;
-  return i;
-}
-
-async function getPoolContributionCentsTx(tx) {
-  try {
-    const cfgRef = db().collection("config").doc("public");
-    const cfgSnap = await tx.get(cfgRef);
-    if (!cfgSnap.exists) return DEFAULT_POOL_CONTRIB_CENTS;
-
-    const d = cfgSnap.data() || {};
-    const v = clampInt(d.poolContributionCents, 0, 5000);
-    if (v == null) return DEFAULT_POOL_CONTRIB_CENTS;
-    return v;
-  } catch {
-    return DEFAULT_POOL_CONTRIB_CENTS;
-  }
-}
-
-/**
- * Resolve contribution for a contest, in priority order:
- * 1) contest.poolContributionCentsLocked
- * 2) contest.poolContributionCents (per-contest editable via Admin)
- * 3) config/public.poolContributionCents
- * 4) DEFAULT_POOL_CONTRIB_CENTS
- */
-async function resolveContributionCentsTx(tx, contestRef, contest) {
-  const locked = clampInt(contest?.poolContributionCentsLocked, 0, 5000);
-  if (locked != null) return locked;
-
-  const perContest = clampInt(contest?.poolContributionCents, 0, 5000);
-  if (perContest != null) return perContest;
-
-  const cfg = await getPoolContributionCentsTx(tx);
-  return clampInt(cfg, 0, 5000) ?? DEFAULT_POOL_CONTRIB_CENTS;
-}
-
 /**
  * GET /api/checkout/confirm?session_id=cs_test_...
  * - Verifies session is paid
- * - Marks entry PAID
- * - Increments contest entryCount + prizeCents (exactly once)
+ * - Marks entry PAID (or QUEUED if contest already resolved)
+ * - Increments contest entryCount (exactly once)
+ *
+ * Sweepstakes model:
+ * - Prize is guaranteed/admin-set (no pooling math here)
  */
 r.get("/api/checkout/confirm", requireUser, async (req, res) => {
   try {
@@ -117,6 +75,7 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
 
     let changed = false;
     let appliedContestIncrement = false;
+    let queued = false;
 
     await db().runTransaction(async (tx) => {
       const [entrySnap, contestSnap] = await Promise.all([tx.get(entryRef), tx.get(contestRef)]);
@@ -126,12 +85,13 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
       const entry = entrySnap.data() || {};
       const contest = contestSnap.data() || {};
 
-      // Idempotency flags
       const alreadyPaid = entry.paid === true;
       const alreadyCounted = entry.countedInContest === true;
 
-      // If contest is resolved, do NOT add to pool; mark queued (but still mark paid)
+      // If contest is resolved, do NOT count toward entryCount; mark queued (but still mark paid)
       if (contest.resolved) {
+        queued = true;
+
         if (!alreadyPaid) {
           tx.update(entryRef, {
             paid: true,
@@ -143,7 +103,6 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
           });
           changed = true;
         } else {
-          // keep IDs fresh + ensure QUEUED status
           const curStatus = String(entry.status || "").toUpperCase();
           tx.update(entryRef, {
             status: curStatus === "QUEUED" ? entry.status : "QUEUED",
@@ -167,7 +126,6 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
         });
         changed = true;
       } else {
-        // keep lastTouchedAt + ids fresh (helps your UNPAID expiry logic hygiene)
         tx.update(entryRef, {
           stripeSessionId: session.id || entry.stripeSessionId || null,
           paymentIntentId: paymentIntentId || entry.paymentIntentId || null,
@@ -175,22 +133,12 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
         });
       }
 
-      // Apply contest increment EXACTLY ONCE
+      // Apply entryCount increment EXACTLY ONCE
       if (!alreadyCounted) {
-        const lockCents = await resolveContributionCentsTx(tx, contestRef, contest);
-
-        // Lock it if missing so future accounting stays consistent
-        const lockedExisting = clampInt(contest.poolContributionCentsLocked, 0, 5000);
-        if (lockedExisting == null) {
-          tx.update(contestRef, { poolContributionCentsLocked: lockCents });
-        }
-
         tx.update(contestRef, {
           entryCount: admin.firestore.FieldValue.increment(1),
-          prizeCents: admin.firestore.FieldValue.increment(lockCents),
         });
 
-        // Flag entry so confirm/webhook can never double-increment
         tx.update(entryRef, {
           countedInContest: true,
           countedAt: nowMs(),
@@ -204,6 +152,7 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
     return res.json({
       ok: true,
       paid: true,
+      queued,
       updated: changed,
       contestIncremented: appliedContestIncrement,
       contestId: finalContestId,

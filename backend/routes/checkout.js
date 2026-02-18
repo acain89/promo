@@ -19,6 +19,10 @@ import { stripe } from "../lib/stripe.js";
 
 const r = Router();
 
+// $10 Game Pass + fee pass-through => charge $10.50
+const GAME_PASS_CHARGE_CENTS = 1050;
+const GAME_PASS_LABEL = "Weekly Game Pass (Daily 4 Sweepstakes Entry)";
+
 // Small helper: normalize frontend url once
 function cleanBase(u) {
   return String(u || "").replace(/\/+$/, "");
@@ -78,9 +82,10 @@ r.post(
       }
 
       /* ---------------------------
-         Validate guess
+         Validate guess (DAILY4 = 4 digits, 0000–9999)
+         Note: we still read MODES as the source of truth, but default to DAILY4.
       ---------------------------- */
-      const mode = MODES[contest.mode] || MODES.PICK3;
+      const mode = MODES.DAILY4 || MODES[contest.mode] || MODES.PICK3;
       const n = Number(onlyDigits(guess));
       if (Number.isNaN(n) || n < mode.min || n > mode.max) {
         return res.status(400).json({ error: "Invalid number." });
@@ -148,17 +153,14 @@ r.post(
           checkoutAttempt = checkoutAttempt + 1;
 
           await entryRef.update({
-            // ✅ allow changing guess before payment
             guess: normalizedGuess,
 
             status: "PENDING_PAYMENT",
             retryAt: now,
             lastTouchedAt: now,
 
-            // new attempt => new Stripe session
             checkoutAttempt,
 
-            // clear any previous session references (best-effort hygiene)
             stripeSessionId: null,
             paymentIntentId: null,
           });
@@ -199,8 +201,6 @@ r.post(
 
       // ✅ success includes session_id so Profile can call /api/checkout/confirm
       const successUrl = `${base}/profile?checkout=success&session_id={CHECKOUT_SESSION_ID}`;
-
-      // ✅ cancel returns to plain Profile screen (no alternate panel / query state)
       const cancelUrl = `${base}/profile`;
 
       const session = await stripe.checkout.sessions.create(
@@ -214,14 +214,13 @@ r.post(
             {
               price_data: {
                 currency: "usd",
-                product_data: { name: "Weekly Game Pass (Digital Access)" },
-                unit_amount: 500,
+                product_data: { name: GAME_PASS_LABEL },
+                unit_amount: GAME_PASS_CHARGE_CENTS,
               },
               quantity: 1,
             },
           ],
 
-          // ✅ deterministic entryId so webhook/confirm can always find the doc to update
           metadata: {
             userId: req.user.id,
             contestId: contest.id,
@@ -229,12 +228,14 @@ r.post(
             contestEndsOn: contest.endsOn || "",
             guess: normalizedGuess,
             checkoutAttempt: String(checkoutAttempt),
+            mode: String(contest.mode || "DAILY4"),
           },
 
+          // Minimal + consistent: don’t teach legality across the site, just the checkout disclosure.
           custom_text: {
             submit: {
               message:
-                "No purchase necessary. Free mail-in entry (AMOE) available. One entry per person per contest.",
+                "No purchase necessary. Free mail-in entry (AMOE) available. One entry per person per weekly contest.",
             },
           },
 
@@ -262,6 +263,7 @@ r.post(
           checkoutAttempt,
           guessChanged,
           prevGuess,
+          amountCents: GAME_PASS_CHARGE_CENTS,
         },
         req
       );

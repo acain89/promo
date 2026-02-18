@@ -8,6 +8,14 @@ export default function PanelShell({
   footer = null,
   bodyScroll = false, // Terms true, Winners list uses its own internal scroll
   children,
+
+  /**
+   * IMPORTANT CHANGE:
+   * - Default nav is OFF now.
+   * - Pages must explicitly opt-in to any top-row navigation via showNav/headerRight.
+   */
+  showNav = false,
+  nav = null, // optional custom nav node if a page wants it
 }) {
   const hasLabel = !!String(label || "").trim();
 
@@ -15,19 +23,28 @@ export default function PanelShell({
     <main className="screen">
       <section className="panel" role="region" aria-label={label || "panel"}>
         <div className="screenPad">
-          {hasLabel || headerRight ? (
+          {showNav || hasLabel || headerRight ? (
             <header className="screenHeader">
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                {hasLabel ? (
-                  <div className={`panelLabel ${labelClass}`} aria-label={`${label} panel`}>
-                    {label}
-                  </div>
-                ) : (
-                  <div />
-                )}
+              {showNav && nav ? (
+                <>
+                  {nav}
+                  <hr className="headerRule" style={{ marginTop: 12 }} />
+                </>
+              ) : null}
 
-                {headerRight ? <div>{headerRight}</div> : null}
-              </div>
+              {hasLabel || headerRight ? (
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  {hasLabel ? (
+                    <div className={`panelLabel ${labelClass}`} aria-label={`${label} panel`}>
+                      {label}
+                    </div>
+                  ) : (
+                    <div />
+                  )}
+
+                  {headerRight ? <div>{headerRight}</div> : null}
+                </div>
+              ) : null}
 
               {hasLabel ? <hr className="headerRule" /> : null}
             </header>

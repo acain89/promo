@@ -1,5 +1,5 @@
 // src/pages/Reveal.jsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import PanelShell from "../ui/PanelShell.jsx";
 import { apiGet, authMe } from "../lib/api.js";
@@ -8,19 +8,10 @@ function onlyDigits(s) {
   return String(s ?? "").replace(/[^\d]/g, "");
 }
 
-function padNum(raw, digits) {
+function pad4(raw) {
   const d = onlyDigits(raw);
   if (!d) return "—";
-  return d.slice(-digits).padStart(digits, "0");
-}
-
-// 1000-cell map index is ALWAYS last-3-digits (000–999), even if DAILY4 exists.
-function norm3ToIndex(raw) {
-  const d = onlyDigits(raw);
-  if (!d) return -1;
-  const last3 = d.slice(-3);
-  const n = Number(last3);
-  return Number.isFinite(n) && n >= 0 && n <= 999 ? n : -1;
+  return d.slice(-4).padStart(4, "0");
 }
 
 function formatDateTime(ts) {
@@ -34,83 +25,143 @@ function formatDateTime(ts) {
   }
 }
 
-function dollarsFromCents(cents) {
-  const n = Number(cents || 0);
-  const v = Number.isFinite(n) ? n : 0;
-  return (v / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
+function absDiff(aRaw, bRaw) {
+  const a = Number(onlyDigits(aRaw));
+  const b = Number(onlyDigits(bRaw));
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  return Math.abs(a - b);
 }
 
-function paidWinnerCardFromRecord(r, digits) {
-  if (!r) return null;
+function pickFirstDefined(obj, keys) {
+  for (const k of keys) {
+    const v = obj?.[k];
+    if (v !== undefined && v !== null && String(v).trim() !== "") return v;
+  }
+  return null;
+}
+
+function normalizeDraws(rs) {
+  // Accept many backend shapes without breaking.
+  const src =
+    rs?.draws ||
+    rs?.daily4Draws ||
+    rs?.contest?.draws ||
+    rs?.contest?.daily4Draws ||
+    rs?.paid?.draws ||
+    rs?.paid?.daily4Draws ||
+    rs?.reveal ||
+    rs?.state ||
+    {};
+
+  const morning = pickFirstDefined(src, ["morning", "am", "morn", "drawMorning", "morningDraw", "m"]);
+  const day = pickFirstDefined(src, ["day", "midday", "noon", "drawDay", "dayDraw", "d"]);
+  const evening = pickFirstDefined(src, ["evening", "pm", "drawEvening", "eveningDraw", "e"]);
+  const night = pickFirstDefined(src, ["night", "late", "drawNight", "nightDraw", "n"]);
+
   return {
-    id: r.id || null,
-    winnerUN: r.winnerUN || r.winner || "—",
-    guess: padNum(r.guess, digits),
-    target: padNum(r.target || r.targetNumber, digits),
-    diff: typeof r.diff === "number" ? r.diff : r.diff ?? "—",
-    entryTimestamp: r.entryTimestamp || r.timestamp || null,
-    resolvedAt: r.resolvedAt || null,
-    prizeCents: Number(r.prizeCents || 0),
-    contestId: r.contestId || null,
-    endsOn: r.endsOn || null,
+    morning: morning != null ? pad4(morning) : "—",
+    day: day != null ? pad4(day) : "—",
+    evening: evening != null ? pad4(evening) : "—",
+    night: night != null ? pad4(night) : "—",
   };
 }
 
-// NOTE: AMOE helpers retained so AMOE logic remains in project.
-// We are only removing AMOE visibility from this Reveal page.
-function amoeWinnerCardFromRecord(r) {
-  if (!r) return null;
-  return {
-    id: r.id || null,
-    winnerName: r.winnerName || r.name || "—",
-    winnerEmail: r.winnerEmail || r.email || null,
-    guess: padNum(r.guess, 3),
-    target: padNum(r.target || r.targetNumber, 3),
-    diff: typeof r.diff === "number" ? r.diff : r.diff ?? "—",
-    entryTimestamp: r.entryTimestamp || r.timestamp || null,
-    resolvedAt: r.resolvedAt || null,
-    prizeCents: Number(r.prizeCents || 0),
-    cycleId: r.cycleId ?? null,
+function computeMyDfts(guess, draws) {
+  const g = pad4(guess);
+  const out = {
+    guess: g,
+    best: null,
+    bestLabel: null,
+    by: {
+      morning: null,
+      day: null,
+      evening: null,
+      night: null,
+    },
   };
+
+  ["morning", "day", "evening", "night"].forEach((k) => {
+    const target = draws[k];
+    if (!guess || g === "—" || !target || target === "—") {
+      out.by[k] = null;
+      return;
+    }
+    out.by[k] = absDiff(g, target);
+  });
+
+  const entries = Object.entries(out.by).filter(([, v]) => typeof v === "number");
+  if (entries.length) {
+    entries.sort((a, b) => a[1] - b[1]);
+    out.bestLabel = entries[0][0];
+    out.best = entries[0][1];
+  }
+
+  return out;
 }
 
-function gridLabelFromIndex(i, digits) {
-  // Display label uses digits (3 or 4), but grid itself is 0..999
-  // For 4 digits, this yields 0000–0999.
-  return String(i).padStart(digits, "0").slice(-digits);
+function labelNice(k) {
+  if (k === "morning") return "Morning";
+  if (k === "day") return "Day";
+  if (k === "evening") return "Evening";
+  if (k === "night") return "Night";
+  return k;
+}
+
+function StatPill({ label, value }) {
+  return (
+    <div
+      style={{
+        borderRadius: 12,
+        padding: "10px 12px",
+        background: "rgba(255,255,255,0.04)",
+        border: "1px solid rgba(255,255,255,0.08)",
+        minHeight: 54,
+        display: "grid",
+        alignContent: "center",
+      }}
+    >
+      <div
+        style={{
+          fontSize: 10,
+          letterSpacing: "0.16em",
+          textTransform: "uppercase",
+          opacity: 0.7,
+        }}
+      >
+        {label}
+      </div>
+      <div style={{ fontSize: 16, fontWeight: 900, marginTop: 2 }}>{value}</div>
+    </div>
+  );
 }
 
 export default function Reveal() {
   const nav = useNavigate();
 
-  const [contest, setContest] = useState(null);
-  const [paidWinner, setPaidWinner] = useState(null);
-
-  // Retained but not displayed
-  const [amoe, setAmoe] = useState(null);
-  const [amoeWinner, setAmoeWinner] = useState(null);
-
-  const [err, setErr] = useState("");
   const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
 
-  // Round summary modal state
-  const [summaryOpen, setSummaryOpen] = useState(false);
-  const [summaryLoading, setSummaryLoading] = useState(false);
-  const [summaryErr, setSummaryErr] = useState("");
-  const [summary, setSummary] = useState(null);
+  const [authed, setAuthed] = useState(false);
+  const [busy, setBusy] = useState(false);
 
-  // viewer entry (so we can circle "your submission" in blue)
-  const [myGuess, setMyGuess] = useState(null);
+  const [state, setState] = useState(null);
+  const [draws, setDraws] = useState({ morning: "—", day: "—", evening: "—", night: "—" });
 
-  const paidDigits = useMemo(() => {
-    const mode = String(contest?.mode || "PICK3").toUpperCase();
-    return mode === "DAILY4" ? 4 : 3;
-  }, [contest?.mode]);
+  // Projected winner (public)
+  const [proj, setProj] = useState(null);
 
-  async function refresh() {
+  // My status (requires login)
+  const [meGuess, setMeGuess] = useState(null);
+
+  const pollRef = useRef(null);
+  const mountedRef = useRef(false);
+
+  async function refresh({ silent = false } = {}) {
     try {
-      setErr("");
-      setLoading(true);
+      if (!silent) {
+        setErr("");
+        setLoading(true);
+      }
 
       let ok = false;
       try {
@@ -119,465 +170,343 @@ export default function Reveal() {
       } catch {
         ok = false;
       }
-
-      if (!ok) {
-        nav("/join", { replace: true });
-        return;
-      }
+      setAuthed(ok);
 
       const rs = await apiGet("/api/reveal-state");
+      setState(rs && typeof rs === "object" ? rs : null);
 
-      const paid = rs?.paid || null;
-      setContest(paid);
+      const d = normalizeDraws(rs);
+      setDraws(d);
 
-      const digits = String(paid?.mode || "PICK3").toUpperCase() === "DAILY4" ? 4 : 3;
-      setPaidWinner(paidWinnerCardFromRecord(rs?.paidWinner || null, digits));
+      // Projected winner: accept whatever backend returns, but don’t break if missing.
+      // Preferred shapes:
+      // - rs.projectedWinner { username, guess, bestDft, bestDraw }
+      // - rs.leaderboard[0]  { username, guess, bestDft, bestDraw }
+      const pw =
+        rs?.projectedWinner ||
+        (Array.isArray(rs?.leaderboard) && rs.leaderboard[0]) ||
+        (Array.isArray(rs?.top10) && rs.top10[0]) ||
+        null;
 
-      // AMOE state retained (not displayed here)
-      setAmoe(rs?.amoe || null);
-      setAmoeWinner(amoeWinnerCardFromRecord(rs?.amoeWinner || null));
+      if (pw) {
+        setProj({
+          username: String(pw.username || pw.un || pw.winnerUN || pw.winner || "—"),
+          guess: pad4(pw.guess || pw.entry || pw.submission || ""),
+          bestDft: pw.bestDft ?? pw.dft ?? pw.bestDiff ?? pw.diff ?? pw.distance ?? null,
+          bestDraw: String(pw.bestDraw || pw.drawLabel || pw.draw || pw.targetLabel || "").trim() || null,
+          timestamp: pw.timestamp || pw.entryTimestamp || pw.submittedAt || null,
+        });
+      } else {
+        setProj(null);
+      }
+
+      // My entry
+      if (ok) {
+        try {
+          const my = await apiGet("/api/my-entry");
+          setMeGuess(my?.ok ? my?.entry?.guess : null);
+        } catch {
+          setMeGuess(null);
+        }
+      } else {
+        setMeGuess(null);
+      }
     } catch (e) {
-      setErr(e.message || "Failed to load results.");
+      if (!silent) setErr(e?.message || "Failed to load reveal.");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }
 
   useEffect(() => {
-    refresh();
+    mountedRef.current = true;
+
+    refresh({ silent: false }).finally(() => {
+      if (!mountedRef.current) return;
+
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(() => {
+        if (document.visibilityState !== "visible") return;
+        refresh({ silent: true });
+      }, 5000);
+    });
+
+    const onVis = () => {
+      if (document.visibilityState === "visible") refresh({ silent: true });
+    };
+    document.addEventListener("visibilitychange", onVis);
+
+    return () => {
+      mountedRef.current = false;
+      document.removeEventListener("visibilitychange", onVis);
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const paidResolved = !!contest?.resolved;
-  const paidTarget =
-    paidWinner?.target !== "—" ? paidWinner?.target : padNum(contest?.targetNumber, paidDigits);
-  const paidEndsOn = contest?.endsOn || paidWinner?.endsOn || "—";
+  const myStats = useMemo(() => {
+    if (!authed || !meGuess) return null;
+    return computeMyDfts(meGuess, draws);
+  }, [authed, meGuess, draws]);
 
-  const paidState = useMemo(() => {
-    if (loading) return "LOADING";
-    if (err) return "ERROR";
-    if (!contest) return "NO_CONTEST";
-    if (!paidResolved) return "PENDING";
-    return "FINAL";
-  }, [loading, err, contest, paidResolved]);
+  const projectedLabelNice = useMemo(() => {
+    if (!proj?.bestDraw) return "—";
+    const t = proj.bestDraw.toLowerCase();
+    if (t.includes("morn")) return "Morning";
+    if (t.includes("day")) return "Day";
+    if (t.includes("eve")) return "Evening";
+    if (t.includes("night")) return "Night";
+    return proj.bestDraw;
+  }, [proj?.bestDraw]);
 
-  async function loadSummaryIfNeeded() {
-    if (summary) return;
-
-    const contestId = String(contest?.id || paidWinner?.contestId || "").trim();
-    if (!contestId) {
-      setSummaryErr("Contest id missing; cannot load round summary.");
-      return;
-    }
-
-    try {
-      setSummaryErr("");
-      setSummaryLoading(true);
-
-      // Load summary map
-      const data = await apiGet(`/api/round-summary?contestId=${encodeURIComponent(contestId)}`);
-      if (!data?.ok) {
-        setSummaryErr("Round summary unavailable.");
-        return;
-      }
-
-      // ✅ IMPORTANT: need "my entry for this contest", not active contest.
-      // Requires backend support: GET /api/my-entry?contestId=...
-      let viewerGuess = null;
-      try {
-        const me = await apiGet(`/api/my-entry?contestId=${encodeURIComponent(contestId)}`);
-        viewerGuess = me?.ok ? me?.entry?.guess : null;
-      } catch {
-        viewerGuess = null;
-      }
-
-      const digits = Number(data.digits || paidDigits);
-
-      setMyGuess(viewerGuess ? padNum(viewerGuess, digits) : null);
-
-      setSummary({
-        contestId: data.contestId || contestId,
-        digits,
-        targetNumber: data.targetNumber ? padNum(data.targetNumber, digits) : null,
-        winnerGuess: data.winnerGuess ? padNum(data.winnerGuess, digits) : null,
-        counts: Array.isArray(data.counts) ? data.counts : [],
-      });
-    } catch (e) {
-      setSummaryErr(e.message || "Failed to load round summary.");
-    } finally {
-      setSummaryLoading(false);
-    }
-  }
-
-  function openSummary() {
-    setSummaryOpen(true);
-    loadSummaryIfNeeded();
-  }
-
-  const gridDigits = Number(summary?.digits || paidDigits);
-  const counts = summary?.counts || [];
-
-  const targetStr =
-    summary?.targetNumber && summary.targetNumber !== "—" ? summary.targetNumber : paidTarget;
-
-  // Blue ring should represent "your submission" if we have it.
-  // Fallback to paidWinner.guess if we don't.
-  const blueRingStr =
-    myGuess && myGuess !== "—"
-      ? myGuess
-      : paidWinner?.guess || summary?.winnerGuess || "—";
-
-  const winnerDisplayStr =
-    summary?.winnerGuess && summary.winnerGuess !== "—"
-      ? summary.winnerGuess
-      : paidWinner?.guess || "—";
-
-  // ✅ Rings use last-3 digits ALWAYS
-  const targetIdx = useMemo(() => norm3ToIndex(targetStr), [targetStr]);
-  const blueIdx = useMemo(() => norm3ToIndex(blueRingStr), [blueRingStr]);
+  // Optional contest text (safe fallbacks)
+  const endsOn =
+    state?.endsOn ||
+    state?.contest?.endsOn ||
+    state?.paid?.endsOn ||
+    state?.contest?.endsOnText ||
+    null;
 
   return (
-    <>
-      <PanelShell
-        label=""
-        labelClass="reveal"
-        footer={
-          <div className="form" style={{ marginTop: 0 }}>
-            <button className="primary" onClick={() => nav("/profile")}>
-              Return to Profile
-            </button>
-          </div>
-        }
-      >
-        <div style={{ display: "grid", gap: 12 }}>
-          <div className="miniMuted" style={{ textAlign: "center" }}>
-            Week ending <strong>{paidEndsOn}</strong>
-          </div>
-
-          {paidState === "LOADING" && <div className="fineprint">Loading…</div>}
-          {paidState === "ERROR" && <div className="error">{err}</div>}
-
-          <div
-            style={{
-              padding: "12px 12px",
-              borderRadius: 14,
-              border: "1px solid rgba(255,255,255,0.10)",
-              background: "rgba(255,255,255,0.02)",
-            }}
+    <PanelShell
+      label=""
+      labelClass="reveal"
+      footer={
+        <div className="fineprint" style={{ opacity: 0.7, textAlign: "center", lineHeight: 1.25 }}>
+          For verification:{" "}
+          <a
+            href="https://www.texaslottery.com/export/sites/lottery/Games/Daily_4/index.html"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "inherit", textDecoration: "underline" }}
           >
-            <div className="label" style={{ textAlign: "center", marginBottom: 10 }}>
-              Paid Weekly Results
-            </div>
-
-            {paidState === "NO_CONTEST" && (
-              <div className="miniMuted" style={{ textAlign: "center" }}>
-                Paid reveal unavailable. Contest state could not be loaded.
-              </div>
-            )}
-
-            {paidState === "PENDING" && (
-              <div style={{ display: "grid", gap: 10, textAlign: "center" }}>
-                <div className="value" style={{ fontSize: "1.05rem", fontWeight: 900 }}>
-                  Results pending
-                </div>
-                <div className="miniMuted">Paid results have not been posted yet.</div>
-                <div className="form" style={{ marginTop: 0 }}>
-                  <button className="secondary" onClick={refresh}>
-                    Refresh
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {paidState === "FINAL" && (
-              <>
-                <div
-                  style={{
-                    padding: "14px 12px",
-                    borderRadius: 14,
-                    border: "1px solid rgba(255,255,255,0.12)",
-                    background: "rgba(255,255,255,0.03)",
-                    textAlign: "center",
-                  }}
-                >
-                  <div className="label" style={{ marginBottom: 8 }}>
-                    Drawn Target Number
-                  </div>
-                  <div
-                    style={{
-                      fontSize: "2.1rem",
-                      fontWeight: 950,
-                      letterSpacing: "0.18em",
-                      fontVariantNumeric: "tabular-nums",
-                    }}
-                  >
-                    {paidTarget || "—"}
-                  </div>
-                </div>
-
-                <div
-                  style={{
-                    marginTop: 10,
-                    padding: "14px 14px",
-                    borderRadius: 14,
-                    border: "1px solid rgba(255,255,255,0.10)",
-                    background: "rgba(255,255,255,0.01)",
-                    textAlign: "left",
-                  }}
-                >
-                  <div className="label" style={{ textAlign: "center", marginBottom: 10 }}>
-                    Paid Winner
-                  </div>
-
-                  {paidWinner ? (
-                    <div style={{ display: "grid", gap: 8 }}>
-                      <div style={{ textAlign: "center" }}>
-                        <div style={{ fontSize: "1.25rem", fontWeight: 950, letterSpacing: "0.02em" }}>
-                          {paidWinner.winnerUN}
-                        </div>
-                        <div className="miniMuted" style={{ marginTop: 2 }}>
-                          {dollarsFromCents(paidWinner.prizeCents)}
-                        </div>
-                      </div>
-
-                      <div style={{ display: "grid", gap: 8, marginTop: 6 }}>
-                        <div style={{ display: "flex", justifyContent: "space-between" }}>
-                          <span className="label">Submission</span>
-                          <span className="value">{paidWinner.guess}</span>
-                        </div>
-                        <div style={{ display: "flex", justifyContent: "space-between" }}>
-                          <span className="label">Target</span>
-                          <span className="value">{paidWinner.target}</span>
-                        </div>
-                        <div style={{ display: "flex", justifyContent: "space-between" }}>
-                          <span className="label">Distance</span>
-                          <span className="value">{paidWinner.diff}</span>
-                        </div>
-                        <div style={{ display: "flex", justifyContent: "space-between" }}>
-                          <span className="label">Submission time</span>
-                          <span className="value">{formatDateTime(paidWinner.entryTimestamp)}</span>
-                        </div>
-                        <div style={{ display: "flex", justifyContent: "space-between" }}>
-                          <span className="label">Posted</span>
-                          <span className="value">{formatDateTime(paidWinner.resolvedAt)}</span>
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="miniMuted" style={{ textAlign: "center" }}>
-                      Results are posted, but the paid winner record isn’t available yet.
-                    </div>
-                  )}
-                </div>
-
-                <div className="form" style={{ marginTop: 10 }}>
-                  <button className="secondary" onClick={openSummary} disabled={summaryLoading}>
-                    Round Summary
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
+            Texas Daily 4
+          </a>
         </div>
-      </PanelShell>
-
-      {summaryOpen ? (
+      }
+    >
+      <div style={{ display: "grid", gap: 12 }}>
+        {/* Top: title + slogan (no Home/Back/Logout buttons) */}
         <div
-          className="prevModal"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Round Summary"
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget) setSummaryOpen(false);
+          style={{
+            fontSize: 34,
+            fontWeight: 900,
+            letterSpacing: "0.06em",
+            color: "var(--accent)",
+            marginTop: 10,
+            textAlign: "left",
           }}
-          style={{ display: "grid", placeItems: "center", padding: 18 }}
         >
-          <div
-            className="prevCard"
-            style={{
-              width: "min(820px, 96vw)",
-              background: "rgba(10,12,18,0.92)",
-              border: "1px solid rgba(255,255,255,0.14)",
-              maxHeight: "86vh",
-              overflow: "hidden",
-            }}
-          >
-            <div className="prevHeader">
-              <div
-                className="prevTitle"
-                style={{
-                  color: "var(--arc2, #00ffd1)",
-                  letterSpacing: "0.14em",
-                  textTransform: "uppercase",
-                  fontSize: 12,
-                  fontWeight: 800,
-                }}
-              >
-                Round Summary
+          drawnfray
+        </div>
+
+        <div style={{ fontSize: 13, letterSpacing: "0.14em", marginTop: -6 }}>
+          <span style={{ color: "#9ad7ff" }}>Select.</span>{" "}
+          <span style={{ color: "#c6a7ff" }}>Submit.</span>{" "}
+          <span style={{ color: "#7affc2" }}>Reveal.</span>
+        </div>
+
+        {endsOn ? (
+          <div className="miniMuted" style={{ textAlign: "center" }}>
+            Week ending <strong>{endsOn}</strong>
+          </div>
+        ) : null}
+
+        {loading ? <div className="fineprint">Loading…</div> : null}
+        {err ? <div className="error">{err}</div> : null}
+
+        {/* Sections 1–4: Draw blocks */}
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+            gap: 10,
+          }}
+        >
+          <StatPill label="Morning" value={draws.morning} />
+          <StatPill label="Day" value={draws.day} />
+          <StatPill label="Evening" value={draws.evening} />
+          <StatPill label="Night" value={draws.night} />
+        </div>
+
+        {/* Section 5: Projected Winner */}
+        <div
+          style={{
+            padding: "14px 14px",
+            borderRadius: 14,
+            border: "1px solid rgba(255,255,255,0.10)",
+            background: "rgba(255,255,255,0.02)",
+          }}
+        >
+          <div className="label" style={{ textAlign: "center", marginBottom: 10 }}>
+            Projected Winner
+          </div>
+
+          {proj ? (
+            <div style={{ display: "grid", gap: 10 }}>
+              <div style={{ textAlign: "center" }}>
+                <div style={{ fontSize: "1.25rem", fontWeight: 950, letterSpacing: "0.02em" }}>
+                  {proj.username}
+                </div>
               </div>
 
-              <button
-                className="prevClose"
-                onClick={() => setSummaryOpen(false)}
-                aria-label="Close"
-                style={{
-                  width: 36,
-                  height: 36,
-                  padding: 0,
-                  display: "grid",
-                  placeItems: "center",
-                  lineHeight: 1,
-                }}
-              >
-                ✕
-              </button>
+              <div style={{ display: "grid", gap: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span className="label">Submission</span>
+                  <span className="value">{proj.guess}</span>
+                </div>
+
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span className="label">DFT</span>
+                  <span className="value">{proj.bestDft ?? "—"}</span>
+                </div>
+
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span className="label">From draw</span>
+                  <span className="value">{projectedLabelNice}</span>
+                </div>
+
+                {proj.timestamp ? (
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span className="label">Timestamp</span>
+                    <span className="value">{formatDateTime(proj.timestamp)}</span>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="miniMuted" style={{ opacity: 0.8, textAlign: "center" }}>
+                Updates automatically as draw results are entered.
+              </div>
             </div>
+          ) : (
+            <div className="miniMuted" style={{ textAlign: "center" }}>
+              Projected winner will appear after entries and/or draw results are available.
+            </div>
+          )}
+        </div>
 
-            <div className="prevBody" style={{ color: "rgba(255,255,255,0.86)", lineHeight: 1.45 }}>
-              {summaryErr ? <div className="error">{summaryErr}</div> : null}
-              {summaryLoading ? <div className="fineprint">Loading round summary…</div> : null}
+        {/* Section 6: My Status */}
+        <div
+          style={{
+            padding: "14px 14px",
+            borderRadius: 14,
+            border: "1px solid rgba(255,255,255,0.10)",
+            background: "rgba(255,255,255,0.01)",
+          }}
+        >
+          <div className="label" style={{ textAlign: "center", marginBottom: 10 }}>
+            My Status
+          </div>
 
-              {!summaryLoading ? (
-                <>
-                  <div style={{ display: "grid", gap: 8, padding: "4px 0 10px" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-                      <div className="miniMuted">
-                        <strong>Target:</strong>{" "}
-                        <span style={{ fontVariantNumeric: "tabular-nums", letterSpacing: "0.12em" }}>
-                          {targetStr || "—"}
-                        </span>
-                      </div>
-
-                      <div className="miniMuted">
-                        <strong>Winner:</strong>{" "}
-                        <span style={{ fontVariantNumeric: "tabular-nums", letterSpacing: "0.12em" }}>
-                          {winnerDisplayStr || "—"}
-                        </span>
-                      </div>
-
-                      <div className="miniMuted">
-                        <strong>Grid:</strong> 20 × 50 (1000)
-                      </div>
-                    </div>
-
-                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap", opacity: 0.85, fontSize: 12 }}>
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                        <span style={{ width: 10, height: 10, borderRadius: 2, background: "rgba(255,255,255,0.55)" }} />
-                        Played
-                      </span>
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                        <span style={{ width: 10, height: 10, borderRadius: 2, background: "rgba(255,255,255,0.14)" }} />
-                        Not played
-                      </span>
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                        <span style={{ width: 12, height: 12, borderRadius: 999, border: "2px solid rgba(255,80,80,0.95)" }} />
-                        Target (last 3 digits)
-                      </span>
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                        <span style={{ width: 12, height: 12, borderRadius: 999, border: "2px solid rgba(80,160,255,0.95)" }} />
-                        Your pick (last 3 digits)
-                      </span>
-                    </div>
-                  </div>
-
-                  <div
-                    style={{
-                      borderRadius: 12,
-                      border: "1px solid rgba(255,255,255,0.10)",
-                      background: "rgba(255,255,255,0.02)",
-                      overflow: "auto",
-                      maxHeight: "58vh",
-                      padding: 10,
-                    }}
-                  >
-                    <div
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "repeat(20, minmax(0, 1fr))",
-                        gap: 6,
-                        minWidth: 720,
-                      }}
-                    >
-                      {Array.from({ length: 1000 }).map((_, i) => {
-                        const playedCount = Number(counts[i] || 0);
-                        const played = playedCount > 0;
-
-                        const isTarget = i === targetIdx;
-                        const isBlue = i === blueIdx;
-
-                        const label = gridLabelFromIndex(i, gridDigits);
-
-                        return (
-                          <div
-                            key={i}
-                            title={`${label}${played ? ` • picked ${playedCount}` : ""}${isTarget ? " • TARGET" : ""}${
-                              isBlue ? " • YOUR PICK" : ""
-                            }`}
-                            style={{
-                              position: "relative",
-                              borderRadius: 10,
-                              padding: "10px 6px",
-                              textAlign: "center",
-                              fontSize: 11,
-                              fontWeight: played ? 900 : 700,
-                              letterSpacing: "0.10em",
-                              fontVariantNumeric: "tabular-nums",
-                              color: played ? "rgba(255,255,255,0.92)" : "rgba(255,255,255,0.36)",
-                              background: played ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.03)",
-                              border: "1px solid rgba(255,255,255,0.08)",
-                              userSelect: "none",
-                            }}
-                          >
-                            {label}
-
-                            {played ? (
-                              <div style={{ marginTop: 4, fontSize: 10, opacity: 0.75, letterSpacing: "0.02em" }}>
-                                {playedCount}
-                              </div>
-                            ) : (
-                              <div style={{ marginTop: 4, fontSize: 10, opacity: 0.25 }}>0</div>
-                            )}
-
-                            {isTarget ? (
-                              <span
-                                style={{
-                                  position: "absolute",
-                                  inset: 3,
-                                  borderRadius: 12,
-                                  border: "2px solid rgba(255,80,80,0.95)",
-                                  pointerEvents: "none",
-                                }}
-                              />
-                            ) : null}
-
-                            {isBlue ? (
-                              <span
-                                style={{
-                                  position: "absolute",
-                                  inset: 7,
-                                  borderRadius: 10,
-                                  border: "2px solid rgba(80,160,255,0.95)",
-                                  pointerEvents: "none",
-                                }}
-                              />
-                            ) : null}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </>
-              ) : null}
-
-              <div className="form" style={{ marginTop: 12 }}>
-                <button className="secondary" onClick={() => setSummaryOpen(false)}>
-                  Close
+          {!authed ? (
+            <div style={{ display: "grid", gap: 10, textAlign: "center" }}>
+              <div className="miniMuted">Log in to see your submission and DFT tracking.</div>
+              <div className="form" style={{ marginTop: 0 }}>
+                <button className="primary" onClick={() => nav("/join")} disabled={busy || loading}>
+                  Log in
                 </button>
               </div>
             </div>
-          </div>
+          ) : !myStats || !myStats.guess || myStats.guess === "—" ? (
+            <div style={{ display: "grid", gap: 10, textAlign: "center" }}>
+              <div className="miniMuted">No submission found for your account.</div>
+              <div className="form" style={{ marginTop: 0 }}>
+                <button className="secondary" onClick={() => nav("/profile")} disabled={busy || loading}>
+                  Go to Profile
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)",
+                gap: 10,
+              }}
+            >
+              {/* Left: submission + best */}
+              <div
+                style={{
+                  borderRadius: 12,
+                  border: "1px solid rgba(255,255,255,0.10)",
+                  background: "rgba(255,255,255,0.02)",
+                  padding: 12,
+                  display: "grid",
+                  gap: 10,
+                  alignContent: "start",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span className="label">Submission</span>
+                  <span className="value" style={{ letterSpacing: "0.14em", fontVariantNumeric: "tabular-nums" }}>
+                    {myStats.guess}
+                  </span>
+                </div>
+
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span className="label">Best DFT</span>
+                  <span className="value">{myStats.best ?? "—"}</span>
+                </div>
+
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span className="label">From draw</span>
+                  <span className="value">{myStats.bestLabel ? labelNice(myStats.bestLabel) : "—"}</span>
+                </div>
+              </div>
+
+              {/* Right: 4 mini sections */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
+                {["morning", "day", "evening", "night"].map((k) => {
+                  const target = draws[k];
+                  const dft = myStats.by[k];
+
+                  return (
+                    <div
+                      key={k}
+                      style={{
+                        borderRadius: 12,
+                        border: "1px solid rgba(255,255,255,0.10)",
+                        background: "rgba(255,255,255,0.02)",
+                        padding: 12,
+                        minHeight: 76,
+                        display: "grid",
+                        alignContent: "center",
+                        gap: 6,
+                      }}
+                    >
+                      <div style={{ fontSize: 10, letterSpacing: "0.16em", textTransform: "uppercase", opacity: 0.7 }}>
+                        {labelNice(k)}
+                      </div>
+
+                      <div
+                        style={{
+                          fontSize: 14,
+                          fontWeight: 900,
+                          letterSpacing: "0.12em",
+                          fontVariantNumeric: "tabular-nums",
+                          opacity: target === "—" ? 0.25 : 1,
+                        }}
+                      >
+                        {target === "—" ? "—" : target}
+                      </div>
+
+                      <div className="miniMuted" style={{ opacity: target === "—" ? 0.25 : 0.85 }}>
+                        {target === "—" ? "DFT: —" : `DFT: ${dft ?? "—"}`}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
-      ) : null}
-    </>
+
+        <div className="form" style={{ marginTop: 0 }}>
+          <button className="secondary" onClick={() => refresh({ silent: false })} disabled={loading || busy}>
+            Refresh
+          </button>
+        </div>
+      </div>
+    </PanelShell>
   );
 }

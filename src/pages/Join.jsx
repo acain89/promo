@@ -2,7 +2,18 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import PanelShell from "../ui/PanelShell.jsx";
-import { authForgot, authLogin, authMe, authSignup } from "../lib/api.js";
+import { authForgot, authLogin, authLogout, authMe, authSignup } from "../lib/api.js";
+
+function formatPhone(raw) {
+  const digits = String(raw || "").replace(/\D/g, "").slice(0, 10);
+  const p1 = digits.slice(0, 3);
+  const p2 = digits.slice(3, 6);
+  const p3 = digits.slice(6, 10);
+
+  if (digits.length <= 3) return p1;
+  if (digits.length <= 6) return `${p1}-${p2}`;
+  return `${p1}-${p2}-${p3}`;
+}
 
 export default function Join() {
   const nav = useNavigate();
@@ -23,6 +34,8 @@ export default function Join() {
   const [suUn, setSuUn] = useState("");
   const [suEmail, setSuEmail] = useState("");
   const [suPw, setSuPw] = useState("");
+  const [suPw2, setSuPw2] = useState("");
+  const [suPhone, setSuPhone] = useState("");
 
   // forgot fields
   const [fpEmail, setFpEmail] = useState("");
@@ -42,6 +55,18 @@ export default function Join() {
       }
     })();
   }, [nav]);
+
+  async function doLogout() {
+    try {
+      setBusy(true);
+      await authLogout();
+    } catch {
+      // ignore
+    } finally {
+      setBusy(false);
+      nav("/", { replace: true });
+    }
+  }
 
   async function doLogin() {
     try {
@@ -75,17 +100,24 @@ export default function Join() {
       if (suUn.trim().length < 2) throw new Error("Username too short.");
       if (!suEmail.includes("@")) throw new Error("Enter a valid email.");
       if (!suPw || suPw.length < 8) throw new Error("Password must be at least 8 characters.");
+      if (suPw !== suPw2) throw new Error("Passwords do not match.");
+
+      const phoneDigits = String(suPhone || "").replace(/\D/g, "");
+      if (phoneDigits.length !== 10) throw new Error("Enter a valid 10-digit phone number.");
 
       await authSignup({
         username: suUn.trim(),
         email: suEmail.trim(),
         password: suPw,
+        phone: phoneDigits,
       });
 
       const m = await authMe();
       if (!m?.ok) throw new Error("Signup failed.");
 
       setSuPw("");
+      setSuPw2("");
+      setSuPhone("");
       nav("/profile", { replace: true });
     } catch (e) {
       setErr(e.message || "Signup failed.");
@@ -121,6 +153,36 @@ export default function Join() {
       /* Match Landing: no visible header label */
       label=""
       labelClass="join"
+      headerRight={
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button
+            className="secondary"
+            onClick={() => nav("/")}
+            disabled={loading || busy}
+            style={{ padding: "8px 10px", fontSize: "0.82rem" }}
+          >
+            Home
+          </button>
+
+          <button
+            className="secondary"
+            onClick={() => (window.history.length > 1 ? nav(-1) : nav("/"))}
+            disabled={loading || busy}
+            style={{ padding: "8px 10px", fontSize: "0.82rem" }}
+          >
+            Back
+          </button>
+
+          <button
+            className="secondary"
+            onClick={doLogout}
+            disabled={loading || busy}
+            style={{ padding: "8px 10px", fontSize: "0.82rem" }}
+          >
+            Log out
+          </button>
+        </div>
+      }
       footer={
         <div style={{ display: "grid", gap: 10 }}>
           <div className="form" style={{ marginTop: 0 }}>
@@ -248,12 +310,36 @@ export default function Join() {
                 <input
                   className="field"
                   type="password"
-                  placeholder="Password"
+                  placeholder="Password (min 8 characters)"
                   value={suPw}
                   onChange={(e) => setSuPw(e.target.value)}
                   disabled={busy}
                   autoComplete="new-password"
                 />
+
+                <input
+                  className="field"
+                  type="password"
+                  placeholder="Confirm Password"
+                  value={suPw2}
+                  onChange={(e) => setSuPw2(e.target.value)}
+                  disabled={busy}
+                  autoComplete="new-password"
+                />
+
+                <input
+                  className="field"
+                  placeholder="Phone (xxx-xxx-xxxx)"
+                  value={suPhone}
+                  onChange={(e) => setSuPhone(formatPhone(e.target.value))}
+                  disabled={busy}
+                  inputMode="numeric"
+                  autoComplete="tel"
+                />
+
+                <div className="fineprint" style={{ marginTop: -6, opacity: 0.75 }}>
+                  Phone number is just used to notify winners. No spam texts ever.
+                </div>
 
                 <button className="primary" type="submit" disabled={busy}>
                   Create Account

@@ -1,4 +1,5 @@
 // backend/index.js
+import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
@@ -17,6 +18,9 @@ import checkoutRoutes from "./routes/checkout.js";
 import checkoutConfirmRoutes from "./routes/checkoutConfirm.js";
 import adminRoutes from "./routes/admin.js";
 import adminUsers from "./routes/adminUsers.js";
+
+// ✅ Add this if you created it
+import profileBootstrapRoutes from "./routes/profileBootstrap.js";
 
 const app = express();
 
@@ -43,6 +47,9 @@ const NO_CACHE_PATHS = new Set([
   "/api/amoe/winners",
   "/api/round-summary",
   "/api/my-entry",
+
+  // ✅ New single-call bootstrap endpoint for Profile
+  "/api/profile-bootstrap",
 ]);
 
 app.use((req, res, next) => {
@@ -53,9 +60,9 @@ app.use((req, res, next) => {
   }
 
   // helps caches handle CORS responses correctly
-const prev = res.getHeader("Vary");
-if (!prev) res.setHeader("Vary", "Origin");
-else if (!String(prev).includes("Origin")) res.setHeader("Vary", `${prev}, Origin`);
+  const prev = res.getHeader("Vary");
+  if (!prev) res.setHeader("Vary", "Origin");
+  else if (!String(prev).includes("Origin")) res.setHeader("Vary", `${prev}, Origin`);
 
   next();
 });
@@ -128,6 +135,11 @@ app.use(adminUsers);
 // Protected (user session required)
 app.use(requireUser, checkoutRoutes);
 app.use(requireUser, checkoutConfirmRoutes);
+app.use(requireUser, profileBootstrapRoutes);
+
+
+// ✅ New: Protected bootstrap (user session required)
+app.use(requireUser, profileBootstrapRoutes);
 
 /* =========================================================
    FALLBACKS

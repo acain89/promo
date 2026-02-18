@@ -23,8 +23,10 @@ function safeEqual(a, b) {
 
 function verifyAdminToken(token) {
   if (!ADMIN_TOKEN_SECRET) return null;
+
   const parts = String(token || "").split(".");
   if (parts.length !== 2) return null;
+
   const [body, sig] = parts;
 
   const expected = hmacSign(body, ADMIN_TOKEN_SECRET);
@@ -39,19 +41,18 @@ function verifyAdminToken(token) {
 
   if (!payload || typeof payload.exp !== "number") return null;
   if (nowMs() > payload.exp) return null;
+
   return payload;
 }
 
 export default function requireAdmin(req, res, next) {
-  const auth = String(req.headers.authorization || "");
+  const auth = String(req.headers.authorization || "").trim();
   const m = auth.match(/^Bearer\s+(.+)$/i);
   if (!m) return res.status(401).json({ error: "Unauthorized." });
 
   const payload = verifyAdminToken(m[1]);
   if (!payload) return res.status(401).json({ error: "Unauthorized." });
 
-  // helpful for logging / future role checks
   req.admin = payload;
-
   next();
 }

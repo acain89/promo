@@ -10,6 +10,10 @@ import {
 } from "./config.js";
 import { nowMs } from "./utils.js";
 
+/* =========================================================
+   TIME HELPERS (CHICAGO OFFICIAL TIME)
+========================================================= */
+
 export function chicagoParts(ms) {
   const dtf = new Intl.DateTimeFormat("en-US", {
     timeZone: CHICAGO_TZ,
@@ -42,12 +46,18 @@ function floorToMinute(ms) {
   return Math.floor(ms / 60000) * 60000;
 }
 
+/* =========================================================
+   CUTOFF LOGIC
+========================================================= */
+
 export function nextChicagoCutoffAfter(startMs) {
   const start = floorToMinute(startMs) + 60000;
   const maxSteps = 14 * 24 * 60 + 5;
+
   for (let i = 0; i < maxSteps; i++) {
     const ms = start + i * 60000;
     const p = chicagoParts(ms);
+
     if (
       p.weekday === CUTOFF_WEEKDAY_SHORT &&
       Number(p.hour) === CUTOFF_HOUR_24 &&
@@ -56,15 +66,18 @@ export function nextChicagoCutoffAfter(startMs) {
       return ms;
     }
   }
+
   return startMs + 7 * 24 * 60 * 60 * 1000;
 }
 
 export function mostRecentChicagoCutoffAtOrBefore(endMs) {
   const end = floorToMinute(endMs);
   const maxSteps = 14 * 24 * 60 + 5;
+
   for (let i = 0; i < maxSteps; i++) {
     const ms = end - i * 60000;
     const p = chicagoParts(ms);
+
     if (
       p.weekday === CUTOFF_WEEKDAY_SHORT &&
       Number(p.hour) === CUTOFF_HOUR_24 &&
@@ -73,12 +86,17 @@ export function mostRecentChicagoCutoffAtOrBefore(endMs) {
       return ms;
     }
   }
+
   return endMs - 7 * 24 * 60 * 60 * 1000;
 }
 
 export function cutoffForEntryMs(entryMs) {
   return nextChicagoCutoffAfter(entryMs);
 }
+
+/* =========================================================
+   CONTEST INITIALIZATION
+========================================================= */
 
 export async function ensureContestForCutoff(cutoffAtMs) {
   const contestId = contestIdFromCutoffMs(cutoffAtMs);
@@ -88,39 +106,40 @@ export async function ensureContestForCutoff(cutoffAtMs) {
   const snap = await contestRef.get();
 
   if (!snap.exists) {
+    const defaultPrizeCents = 10000; // $100 guaranteed starting default
+
     await contestRef.set({
       id: contestId,
-      mode: "PICK3",
+      mode: "DAILY4",
       cutoffAt: cutoffAtMs,
       endsOn,
       resolved: false,
       resolvedAt: null,
       entryCount: 0,
-      targetNumber: null,
-      prizeCents: 0,
+      guaranteedPrizeCents: defaultPrizeCents,
+      bonusPrizeCents: 0,
+      finalPrizeCents: defaultPrizeCents,
+      drawResults: [],
+      winnerId: null,
       activatedAt: null,
       createdAt: nowMs(),
     });
 
     return {
       id: contestId,
-      mode: "PICK3",
+      mode: "DAILY4",
       cutoffAt: cutoffAtMs,
       endsOn,
       resolved: false,
       entryCount: 0,
-      prizeCents: 0,
+      guaranteedPrizeCents: defaultPrizeCents,
+      bonusPrizeCents: 0,
+      finalPrizeCents: defaultPrizeCents,
       activatedAt: null,
     };
   }
 
-  const c = snap.data();
-  if (!c.cutoffAt || Number(c.cutoffAt) !== Number(cutoffAtMs) || !c.endsOn) {
-    await contestRef.update({ cutoffAt: cutoffAtMs, endsOn });
-    return { ...c, cutoffAt: cutoffAtMs, endsOn };
-  }
-
-  return c;
+  return snap.data();
 }
 
 export async function ensureActiveContestNow() {
@@ -132,13 +151,14 @@ export async function ensureActiveContestNow() {
       contestId: contest.id,
       cutoffAt: contest.cutoffAt,
       endsOn: contest.endsOn,
-      mode: contest.mode || "PICK3",
+      mode: contest.mode || "DAILY4",
       updatedAt: nowMs(),
     },
     { merge: true }
   );
 
   const ref = db().collection("contests").doc(contest.id);
+
   if (!contest.activatedAt) {
     const t = nowMs();
     await ref.set({ activatedAt: t }, { merge: true });
@@ -157,7 +177,7 @@ export async function getContestForEntryTime(entryMs) {
       contestId: contest.id,
       cutoffAt: contest.cutoffAt,
       endsOn: contest.endsOn,
-      mode: contest.mode || "PICK3",
+      mode: contest.mode || "DAILY4",
       updatedAt: nowMs(),
     },
     { merge: true }
@@ -173,20 +193,21 @@ export function safeContestForClient(contest) {
     ok: true,
     serverNow: nowMs(),
     id: contest.id || null,
-    mode: contest.mode || "PICK3",
+    mode: contest.mode || "DAILY4",
     cutoffAt: contest.cutoffAt ?? null,
     endsOn: contest.endsOn ?? null,
     resolved: !!contest.resolved,
     resolvedAt: contest.resolvedAt ?? null,
-    targetNumber: contest.targetNumber ?? null,
     entryCount: Number(contest.entryCount || 0),
-    prizeCents: Number(contest.prizeCents || 0),
+    guaranteedPrizeCents: Number(contest.guaranteedPrizeCents || 0),
+    bonusPrizeCents: Number(contest.bonusPrizeCents || 0),
+    finalPrizeCents: Number(contest.finalPrizeCents || 0),
     activatedAt: contest.activatedAt ?? null,
   };
 }
 
 /* =========================================================
-   AMOE STATE INIT
+   AMOE STATE INIT (UNCHANGED STRUCTURE)
 ========================================================= */
 
 export async function getOrInitAmoeState() {
@@ -205,6 +226,7 @@ export async function getOrInitAmoeState() {
     createdAt: nowMs(),
     updatedAt: nowMs(),
   };
+
   await ref.set(init);
   return { ref, state: init };
 }

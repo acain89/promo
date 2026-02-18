@@ -13,6 +13,29 @@ import Reset from "./pages/Reset.jsx";
 
 import Profile from "./pages/Profile.jsx";
 
+import { authLogout } from "./lib/api.js";
+
+/* =========================================================
+   Tiny logout route (so "Log out" can be a real page too)
+========================================================= */
+function Logout() {
+  const nav = useNavigate();
+
+  useEffect(() => {
+    (async () => {
+      try {
+        await authLogout();
+      } catch {
+        // ignore
+      } finally {
+        nav("/", { replace: true });
+      }
+    })();
+  }, [nav]);
+
+  return <Navigate to="/" replace />;
+}
+
 export default function App() {
   const navigate = useNavigate();
 
@@ -38,6 +61,9 @@ export default function App() {
       <Route path="/winners" element={<Winners />} />
       <Route path="/terms" element={<Terms />} />
       <Route path="/reveal" element={<Reveal />} />
+
+      {/* real logout route */}
+      <Route path="/logout" element={<Logout />} />
 
       {/* Compliance-friendly aliases (same content for now) */}
       <Route path="/official-rules" element={<Navigate to="/terms" replace />} />
