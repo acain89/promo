@@ -1,6 +1,8 @@
 // src/pages/Admin.jsx
 import React, { useEffect, useMemo, useState } from "react";
 import { apiPost, setAdminToken } from "../lib/api.js";
+import AdminSimPanel from "./admin/AdminSimPanel.jsx";
+
 
 function onlyDigits(s) {
   return String(s ?? "").replace(/[^\d]/g, "");
@@ -810,6 +812,7 @@ export default function Admin() {
         </div>
 
         <div style={twoColStyle}>
+          <AdminSimPanel />
           {/* LEFT: PAID WEEKLY GAME */}
           <section style={panelStyle}>
             <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>

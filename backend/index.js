@@ -18,6 +18,8 @@ import checkoutRoutes from "./routes/checkout.js";
 import checkoutConfirmRoutes from "./routes/checkoutConfirm.js";
 import adminRoutes from "./routes/admin.js";
 import adminUsers from "./routes/adminUsers.js";
+import adminSimRoutes from "./routes/adminSim.js";
+
 
 // ✅ Add this if you created it
 import profileBootstrapRoutes from "./routes/profileBootstrap.js";
@@ -131,11 +133,16 @@ app.use(publicRoutes);
 // Admin routes (admin.js enforces requireAdmin internally except /api/admin/login)
 app.use(adminRoutes);
 app.use(adminUsers);
+app.use(adminSimRoutes);
+
 
 // Protected (user session required)
 app.use(requireUser, checkoutRoutes);
 app.use(requireUser, checkoutConfirmRoutes);
 app.use(requireUser, profileBootstrapRoutes);
+app.use(adminRoutes);
+app.use(adminUsers);
+
 
 /* =========================================================
    FALLBACKS
