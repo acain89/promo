@@ -8,14 +8,14 @@ import { db } from "../lib/firestore.js";
 const r = Router();
 
 /**
- * POST /api/admin/user-lookup
+ * POST /api/admin/user-lookup-lite
  * Body: { username: "Postman" }
  * Returns: { ok: true, user: { id, username, email } }
  */
 r.post(
-  "/api/admin/user-lookup",
+  "/api/admin/user-lookup-lite",
   requireAdmin,
-  rateLimit({ routeKey: "admin_user_lookup", limit: 60, windowMs: 15 * 60 * 1000 }),
+  rateLimit({ routeKey: "admin_user_lookup_lite", limit: 60, windowMs: 15 * 60 * 1000 }),
   async (req, res) => {
     try {
       const unRaw = String(req.body?.username || "").trim();
@@ -23,7 +23,6 @@ r.post(
 
       const usernameLower = unRaw.toLowerCase();
 
-      // ✅ IMPORTANT: db is a function in this codebase
       const q = await db()
         .collection("users")
         .where("usernameLower", "==", usernameLower)

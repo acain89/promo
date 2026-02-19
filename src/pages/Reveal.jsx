@@ -40,8 +40,65 @@ function pickFirstDefined(obj, keys) {
   return null;
 }
 
+function slotKeyToLabel(slotKey) {
+  const n = Number(slotKey);
+  if (n === 1) return "Morning";
+  if (n === 2) return "Day";
+  if (n === 3) return "Evening";
+  if (n === 4) return "Night";
+  return "—";
+}
+
+function labelToKey(label) {
+  const t = String(label || "").toLowerCase();
+  if (t.includes("morn")) return "morning";
+  if (t.includes("day")) return "day";
+  if (t.includes("eve")) return "evening";
+  if (t.includes("night")) return "night";
+  return null;
+}
+
+/**
+ * Normalize draws for UI:
+ * - Prefer new backend shape: rs.paid.targets[slot].target
+ * - If exact match ended early (resolvedSlot), hide later draws even if present
+ * - Fallback to legacy shapes without breaking
+ */
 function normalizeDraws(rs) {
-  // Accept many backend shapes without breaking.
+  const out = { morning: "—", day: "—", evening: "—", night: "—" };
+
+  const paid = rs?.paid && typeof rs.paid === "object" ? rs.paid : null;
+  const targets = paid?.targets && typeof paid.targets === "object" ? paid.targets : null;
+
+  // If exact match ended early, later draws are not recorded (and should not display)
+  const resolvedSlot =
+    paid?.resolved && paid?.resolvedSlot != null ? Number(paid.resolvedSlot) : null;
+  const endedEarly =
+    paid?.resolved &&
+    resolvedSlot != null &&
+    Number.isFinite(resolvedSlot) &&
+    resolvedSlot >= 1 &&
+    resolvedSlot <= 4;
+
+  if (targets) {
+    for (const slotStr of ["1", "2", "3", "4"]) {
+      const slotNum = Number(slotStr);
+      if (endedEarly && slotNum > resolvedSlot) {
+        // Game ended early: remaining draws are not recorded
+        continue;
+      }
+
+      const t = targets?.[slotStr];
+      const v = t?.target ?? t?.value ?? t?.number ?? null;
+      const label = t?.drawLabel || slotKeyToLabel(slotStr);
+      const key = labelToKey(label) || labelToKey(slotKeyToLabel(slotStr));
+
+      if (key && v != null) out[key] = pad4(v);
+    }
+    return out;
+  }
+
+  // Legacy fallback (older backend shapes)
   const src =
     rs?.draws ||
     rs?.daily4Draws ||
@@ -99,14 +156,6 @@ function computeMyDfts(guess, draws) {
   return out;
 }
 
-function labelNice(k) {
-  if (k === "morning") return "Morning";
-  if (k === "day") return "Day";
-  if (k === "evening") return "Evening";
-  if (k === "night") return "Night";
-  return k;
-}
-
 function StatPill({ label, value }) {
   return (
     <div
@@ -146,17 +195,6 @@ function Row({ label, value }) {
   );
 }
 
-function normalizeEndsOnText(raw) {
-  const s = String(raw || "").trim();
-  if (!s) return null;
-
-  // Upcoming Saturday is 02/21/26 (not 02/14/26)
-  // If backend sends the old date string, fix it here so UI is correct.
-  if (s.includes("02/14/26")) return s.replaceAll("02/14/26", "02/21/26");
-
-  return s;
-}
-
 export default function Reveal() {
   const nav = useNavigate();
 
@@ -169,12 +207,12 @@ export default function Reveal() {
   const [state, setState] = useState(null);
   const [draws, setDraws] = useState({ morning: "—", day: "—", evening: "—", night: "—" });
 
-  // Projected winner (public)
+  // Projected winner (public) or final winner after resolve
   const [proj, setProj] = useState(null);
 
   // My status (requires login)
   const [meUser, setMeUser] = useState(null);
-  const [myEntry, setMyEntry] = useState(null); // store full entry so we can show timestamp, etc.
+  const [myEntry, setMyEntry] = useState(null);
 
   const pollRef = useRef(null);
   const mountedRef = useRef(false);
@@ -187,7 +225,7 @@ export default function Reveal() {
       // ignore
     } finally {
       setBusy(false);
-      nav("/"); // safe landing
+      nav("/");
     }
   }
 
@@ -213,11 +251,19 @@ export default function Reveal() {
       const rs = await apiGet("/api/reveal-state");
       setState(rs && typeof rs === "object" ? rs : null);
 
-      const d = normalizeDraws(rs);
-      setDraws(d);
+      setDraws(normalizeDraws(rs));
 
-      // Projected winner: accept whatever backend returns, but don’t break if missing.
+      const paid = rs?.paid && typeof rs.paid === "object" ? rs.paid : null;
+
+      // Prefer: paid.winner (stable snapshot) after resolve, else paid.projectedWinner during collecting,
+      // fallback to legacy top-level shapes if present.
+      const winnerObj = paid?.winner || null;
+      const projectedObj = paid?.projectedWinner || null;
+
       const pw =
+        winnerObj ||
+        projectedObj ||
+        rs?.paidWinner ||
         rs?.projectedWinner ||
         (Array.isArray(rs?.leaderboard) && rs.leaderboard[0]) ||
         (Array.isArray(rs?.top10) && rs.top10[0]) ||
@@ -229,13 +275,16 @@ export default function Reveal() {
           guess: pad4(pw.guess || pw.entry || pw.submission || ""),
           bestDft: pw.bestDft ?? pw.dft ?? pw.bestDiff ?? pw.diff ?? pw.distance ?? null,
           bestDraw: String(pw.bestDraw || pw.drawLabel || pw.draw || pw.targetLabel || "").trim() || null,
-          timestamp: pw.timestamp || pw.entryTimestamp || pw.submittedAt || null,
+          timestamp: pw.timestamp || pw.entryTimestamp || pw.submittedAt || pw.playedAt || null,
+          exact: typeof pw.exact === "boolean" ? pw.exact : null,
+          resolved: !!paid?.resolved,
+          resolvedSlot: paid?.resolvedSlot ?? null,
+          resolvedBy: paid?.resolvedBy ?? null,
         });
       } else {
         setProj(null);
       }
 
-      // My entry
       if (ok) {
         try {
           const my = await apiGet("/api/my-entry");
@@ -289,7 +338,7 @@ export default function Reveal() {
 
   const projectedLabelNice = useMemo(() => {
     if (!proj?.bestDraw) return "—";
-    const t = proj.bestDraw.toLowerCase();
+    const t = String(proj.bestDraw).toLowerCase();
     if (t.includes("morn")) return "Morning";
     if (t.includes("day")) return "Day";
     if (t.includes("eve")) return "Evening";
@@ -297,14 +346,18 @@ export default function Reveal() {
     return proj.bestDraw;
   }, [proj?.bestDraw]);
 
+  // Week-ending should now come correctly from backend (computed from cutoffAt)
   const endsOnRaw =
+    state?.paid?.endsOn ||
     state?.endsOn ||
     state?.contest?.endsOn ||
-    state?.paid?.endsOn ||
     state?.contest?.endsOnText ||
     null;
 
-  const endsOn = useMemo(() => normalizeEndsOnText(endsOnRaw), [endsOnRaw]);
+  const endsOn = useMemo(() => {
+    const s = String(endsOnRaw || "").trim();
+    return s ? s : null;
+  }, [endsOnRaw]);
 
   const myUsername = useMemo(() => {
     const u = meUser;
@@ -338,6 +391,8 @@ export default function Reveal() {
     color: "inherit",
     cursor: "pointer",
   };
+
+  const paidResolved = !!state?.paid?.resolved;
 
   return (
     <PanelShell
@@ -423,7 +478,7 @@ export default function Reveal() {
           <StatPill label="Night" value={draws.night} />
         </div>
 
-        {/* Section 5: Projected Winner */}
+        {/* Section 5: Winner/Projected Winner */}
         <div
           style={{
             padding: "14px 14px",
@@ -433,7 +488,7 @@ export default function Reveal() {
           }}
         >
           <div className="label" style={{ textAlign: "center", marginBottom: 10 }}>
-            Projected Winner
+            {paidResolved ? "Winner" : "Projected Winner"}
           </div>
 
           {proj ? (
@@ -466,15 +521,26 @@ export default function Reveal() {
                     <span className="value">{formatDateTime(proj.timestamp) || "—"}</span>
                   </div>
                 ) : null}
+
+                {paidResolved && proj?.resolvedSlot ? (
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span className="label">Ended on</span>
+                    <span className="value">
+                      {slotKeyToLabel(proj.resolvedSlot)} {proj?.resolvedBy ? `(${proj.resolvedBy})` : ""}
+                    </span>
+                  </div>
+                ) : null}
               </div>
 
               <div className="miniMuted" style={{ opacity: 0.8, textAlign: "center" }}>
-                Updates automatically as draw results are entered.
+                {paidResolved ? "Final winner is locked." : "Updates automatically as draw results are entered."}
               </div>
             </div>
           ) : (
             <div className="miniMuted" style={{ textAlign: "center" }}>
-              Projected winner will appear after entries and/or draw results are available.
+              {paidResolved
+                ? "Winner will appear after results are posted."
+                : "Projected winner will appear after entries and/or draw results are available."}
             </div>
           )}
         </div>
@@ -527,8 +593,6 @@ export default function Reveal() {
               <Row label="DFT Night:" value={dftLine("night")} />
 
               <Row label="Current Winner:" value={isCurrentWinner === null ? "" : isCurrentWinner ? "Yes" : "No"} />
-
-              {/* removed "Go to Profile" button entirely */}
             </div>
           )}
         </div>

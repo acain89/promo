@@ -20,9 +20,11 @@ import adminRoutes from "./routes/admin.js";
 import adminUsers from "./routes/adminUsers.js";
 import adminSimRoutes from "./routes/adminSim.js";
 
-
 // ✅ Add this if you created it
 import profileBootstrapRoutes from "./routes/profileBootstrap.js";
+
+// ✅ NEW: availability endpoint for Profile (paid/AMOE claimed numbers)
+import guessAvailabilityRoutes from "./routes/guessAvailability.js";
 
 const app = express();
 
@@ -52,6 +54,9 @@ const NO_CACHE_PATHS = new Set([
 
   // ✅ New single-call bootstrap endpoint for Profile
   "/api/profile-bootstrap",
+
+  // ✅ NEW: number availability checks should never cache
+  "/api/guess-availability",
 ]);
 
 app.use((req, res, next) => {
@@ -82,7 +87,7 @@ const allowed = (Array.isArray(ALLOWED_ORIGINS) ? ALLOWED_ORIGINS : [])
 
 const corsOptions = {
   origin: (origin, cb) => {
-    // allow non-browser clients / same-origin / server-to-server
+    // allow non-browser clients / same-origin / server-to-server (Stripe has no Origin)
     if (!origin) return cb(null, true);
 
     const o = normalizeOrigin(origin);
@@ -95,7 +100,6 @@ const corsOptions = {
   // Make preflight explicit and reliable for Admin bearer token + JSON
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "expires", "cache-control", "pragma"],
-
   exposedHeaders: [],
   optionsSuccessStatus: 204,
   maxAge: 86400,
@@ -130,19 +134,17 @@ app.use(authRoutes);
 // Public
 app.use(publicRoutes);
 
-// Admin routes (admin.js enforces requireAdmin internally except /api/admin/login)
+// Admin routes (admin.js/adminUsers/adminSim should enforce requireAdmin internally,
+// except /api/admin/login which must stay public)
 app.use(adminRoutes);
 app.use(adminUsers);
 app.use(adminSimRoutes);
-
 
 // Protected (user session required)
 app.use(requireUser, checkoutRoutes);
 app.use(requireUser, checkoutConfirmRoutes);
 app.use(requireUser, profileBootstrapRoutes);
-app.use(adminRoutes);
-app.use(adminUsers);
-
+app.use(requireUser, guessAvailabilityRoutes);
 
 /* =========================================================
    FALLBACKS

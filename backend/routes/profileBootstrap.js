@@ -2,6 +2,8 @@
 import { Router } from "express";
 import { db } from "../lib/firestore.js";
 import { ensureActiveContestNow } from "../lib/time.js";
+import { onlyDigits, normalizeNumber, nowMs } from "../lib/utils.js";
+import { MODES } from "../lib/config.js";
 
 const r = Router();
 
@@ -57,10 +59,103 @@ r.get("/api/profile-bootstrap", async (req, res) => {
       user,
       contest: contest || null,
       entry,
-      serverTimeMs: Date.now(),
+      serverTimeMs: nowMs(),
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e?.message || "Failed to load profile data." });
+  }
+});
+
+/**
+ * GET /api/guess-availability?guess=1234
+ * Protected (mounted under requireUser)
+ *
+ * A number is "claimed" if an entry exists for the active contest where:
+ * - guess == normalizedGuess
+ * - countedInContest === true
+ *
+ * Returns:
+ * {
+ *   ok: true,
+ *   contestId,
+ *   guess,             // normalized
+ *   available: boolean,
+ *   claimedBySelf: boolean
+ * }
+ */
+r.get("/api/guess-availability", async (req, res) => {
+  try {
+    const userId = req?.user?.id;
+    if (!userId) return res.status(401).json({ ok: false, error: "Unauthorized." });
+
+    const contest = await ensureActiveContestNow();
+    if (!contest?.id || contest.resolved) {
+      return res.status(400).json({ ok: false, error: "Contest unavailable." });
+    }
+
+    const raw = String(req.query?.guess || "").trim();
+    const digitsOnly = onlyDigits(raw);
+
+    const mode = MODES.DAILY4 || MODES[contest.mode] || MODES.PICK3;
+    if (digitsOnly.length !== Number(mode.digits)) {
+      return res.json({
+        ok: true,
+        contestId: String(contest.id),
+        guess: null,
+        available: false,
+        claimedBySelf: false,
+        error: `Enter a ${mode.digits}-digit number.`,
+      });
+    }
+
+    const n = Number(digitsOnly);
+    if (!Number.isFinite(n) || n < mode.min || n > mode.max) {
+      return res.json({
+        ok: true,
+        contestId: String(contest.id),
+        guess: null,
+        available: false,
+        claimedBySelf: false,
+        error: "Invalid number.",
+      });
+    }
+
+    const guessNorm = normalizeNumber(n, mode.digits);
+
+    // Check if someone has already CLAIMED this number (paid OR AMOE mirrored)
+    // NOTE: This query may require an index depending on your Firestore rules/console.
+    const snap = await db()
+      .collection("entries")
+      .doc(String(contest.id))
+      .collection("items")
+      .where("guess", "==", guessNorm)
+      .where("countedInContest", "==", true)
+      .limit(2)
+      .get();
+
+    if (snap.empty) {
+      return res.json({
+        ok: true,
+        contestId: String(contest.id),
+        guess: guessNorm,
+        available: true,
+        claimedBySelf: false,
+      });
+    }
+
+    // If the only claimant is you, it’s “available” (because it’s yours)
+    const docs = snap.docs;
+    const onlySelf = docs.every((d) => d.id === String(userId));
+
+    return res.json({
+      ok: true,
+      contestId: String(contest.id),
+      guess: guessNorm,
+      available: !!onlySelf,
+      claimedBySelf: !!onlySelf,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || "Availability check failed." });
   }
 });
 

@@ -11,7 +11,6 @@ import { ensureActiveContestNow } from "../lib/time.js";
 import { nowMs, absDiff, normalizeNumber, onlyDigits } from "../lib/utils.js";
 import { HISTORY_LIMIT } from "../lib/config.js";
 
-
 const r = Router();
 
 /* =========================================================
@@ -155,31 +154,48 @@ async function deleteCollectionInBatches(colRef, batchSize = MAX_BATCH_DELETE) {
   return deleted;
 }
 
+/**
+ * Safer trimming that avoids query/index pitfalls.
+ * - If simOnly=true: only trims sim winners and never touches real winners.
+ * - If simOnly=false: trims overall winners collection.
+ */
 async function trimWinnersHistory({ simOnly = false } = {}) {
   const winnersRef = db().collection("winners");
-  let q = winnersRef.orderBy("resolvedAt", "desc");
 
-  // Optional: only trim sim winners (safer while you’re testing)
-  if (simOnly) q = q.where("sim", "==", true);
-
-  const snap = await q.get();
+  // Pull a bounded window; enough to cover your trim use-case safely.
+  const snap = await winnersRef.orderBy("resolvedAt", "desc").limit(2000).get();
   const docs = snap.docs;
-  if (docs.length <= HISTORY_LIMIT) return { trimmed: 0 };
 
-  const extra = docs.slice(HISTORY_LIMIT);
+  const keep = [];
+  const deletable = [];
 
-  // batch delete in chunks (500 max)
+  for (const d of docs) {
+    const data = d.data() || {};
+    const isSim = data.sim === true;
+
+    if (simOnly) {
+      if (!isSim) continue; // ignore real winners entirely
+      if (keep.length < HISTORY_LIMIT) keep.push(d);
+      else deletable.push(d);
+    } else {
+      if (keep.length < HISTORY_LIMIT) keep.push(d);
+      else deletable.push(d);
+    }
+  }
+
+  if (!deletable.length) return { trimmed: 0 };
+
   let trimmed = 0;
-  for (let i = 0; i < extra.length; i += 450) {
-    const chunk = extra.slice(i, i + 450);
+  for (let i = 0; i < deletable.length; i += 450) {
+    const chunk = deletable.slice(i, i + 450);
     const batch = db().batch();
     for (const d of chunk) batch.delete(d.ref);
     await batch.commit();
     trimmed += chunk.length;
   }
+
   return { trimmed };
 }
-
 
 /**
  * NOTE: We write entry docs with deterministic docIds when we can.
@@ -238,6 +254,24 @@ function sampleIdsFromDocs(docs, sampleN) {
   const ids = docs.map((d) => d.id);
   shuffleInPlace(ids);
   return ids.slice(0, n);
+}
+
+/**
+ * Compute eligible/total counts from entries collection.
+ */
+async function computeCountsForContest(contestId) {
+  const col = db().collection("entries").doc(contestId).collection("items");
+  const snap = await col.get();
+
+  const total = snap.size;
+  let eligible = 0;
+
+  snap.forEach((d) => {
+    const e = d.data() || {};
+    if (isUnifiedEligible(e)) eligible += 1;
+  });
+
+  return { totalEntries: total, eligibleCount: eligible };
 }
 
 /* =========================================================
@@ -300,11 +334,16 @@ async function resetContestForSim({ contestId }) {
       mode: "DAILY4",
       resolved: false,
       resolvedAt: null,
+      resolvedBy: null,
+      resolvedSlot: null,
+      winner: null,
       targetNumber: null, // legacy
+
       targets: {},
       projectedWinner: null,
       targetsUpdatedAt: null,
       entryCount: 0,
+
       resetAt: nowMs(),
       simLastError: null,
     },
@@ -384,10 +423,18 @@ async function resolveContestWithRandomTargets({ contestId }) {
         targetsUpdatedAt: nowMs(),
       };
 
+      // Exact hit ends immediately
       if (r0.best.exact) {
         patch.resolved = true;
         patch.resolvedAt = nowMs();
-        patch.targetNumber = r0.targetNorm; // legacy field
+        patch.resolvedBy = "EXACT";
+        patch.resolvedSlot = slot;
+
+        // legacy
+        patch.targetNumber = r0.targetNorm;
+
+        // snapshot preferred for Reveal
+        patch.winner = projectedWinner || null;
       }
 
       tx.set(contestRef, patch, { merge: true });
@@ -400,14 +447,39 @@ async function resolveContestWithRandomTargets({ contestId }) {
   // Ensure resolved even if no exact
   const snap2 = await contestRef.get();
   const c2 = snap2.exists ? snap2.data() || {} : {};
+
   if (!c2.resolved) {
-    await contestRef.set({ resolved: true, resolvedAt: nowMs() }, { merge: true });
+    await contestRef.set(
+      {
+        resolved: true,
+        resolvedAt: nowMs(),
+        resolvedBy: "CLOSEST",
+        resolvedSlot: 4, // because sim ran all 4 without exact
+
+        winner: c2.projectedWinner || null,
+
+        // legacy best-effort
+        targetNumber: c2.projectedWinner?.target ?? c2.targetNumber ?? null,
+      },
+      { merge: true }
+    );
+  } else {
+    // If it ended early on exact inside the loop, ensure legacy targetNumber aligns to winner target
+    await contestRef.set(
+      {
+        resolvedBy: c2.resolvedBy || "EXACT",
+        resolvedSlot: c2.resolvedSlot ?? null,
+        winner: c2.winner || c2.projectedWinner || null,
+        targetNumber: c2.winner?.target ?? c2.projectedWinner?.target ?? c2.targetNumber ?? null,
+      },
+      { merge: true }
+    );
   }
 
-  // Winner record from projectedWinner
+  // Winner record from projectedWinner / winner snapshot
   const snap3 = await contestRef.get();
   const c3 = snap3.exists ? snap3.data() || {} : {};
-  const proj = c3.projectedWinner || null;
+  const proj = c3.winner || c3.projectedWinner || null;
 
   let winner = null;
   if (proj) {
@@ -415,15 +487,23 @@ async function resolveContestWithRandomTargets({ contestId }) {
     const bonus = Number(c3.bonusPrizeCents || 0);
     const finalPrize = Number(c3.finalPrizeCents || 0) || guaranteed + bonus;
 
+    const counts = await computeCountsForContest(contestId);
+
     winner = {
       contestId,
       endsOn: c3.endsOn || null,
       mode: "DAILY4",
 
+      // how it ended
+      resolvedBy: c3.resolvedBy || (proj.exact ? "EXACT" : "CLOSEST"),
+      resolvedSlot: Number(c3.resolvedSlot || 4),
+
+      // winning draw info (best so far overall)
       target: proj.target || null,
       drawLabel: proj.drawLabel || null,
       playedAt: proj.playedAt || null,
 
+      // winner
       winnerUN: proj.winnerUN || "—",
       winnerUserId: proj.winnerUserId || null,
       source: proj.source || null,
@@ -432,13 +512,15 @@ async function resolveContestWithRandomTargets({ contestId }) {
       exact: !!proj.exact,
       entryTimestamp: Number(proj.entryTimestamp ?? 0),
 
+      // payouts
       guaranteedPrizeCents: guaranteed,
       bonusPrizeCents: bonus,
       finalPrizeCents: finalPrize,
 
+      // metadata
       resolvedAt: nowMs(),
-      eligibleCount: Number(c3.entryCount || 0),
-      totalEntries: Number(c3.entryCount || 0),
+      eligibleCount: counts.eligibleCount,
+      totalEntries: counts.totalEntries,
       sim: true,
     };
 
@@ -469,10 +551,12 @@ r.post(
         includeAmoe = true,
         paidRatio = 0.85,
         autoResolve = true,
+
         // extra knobs:
         includeDisqualified = false, // if true, also creates some REFUNDED/DISPUTED/EXPIRED/QUEUED rows
         disqualifiedRatio = 0.02, // portion of seeded rows flagged as ineligible (only if includeDisqualified)
-        // ensure countedInContest present:
+
+        // ensure countedInContest present on eligible ones:
         forceCountedFlag = true,
       } = req.body || {};
 
@@ -569,12 +653,17 @@ r.post(
 
       const created = await writeEntriesInBatches({ contestId, items, batchSize: MAX_BATCH_WRITE });
 
+      // Set entryCount to ELIGIBLE count (not just docs created)
+      const counts = await computeCountsForContest(contestId);
+
       await db().collection("contests").doc(contestId).set(
         {
-          entryCount: created,
+          entryCount: counts.eligibleCount,
           mode: "DAILY4",
           simLastRunAt: nowMs(),
           simLastRunCount: created,
+          simLastRunEligibleCount: counts.eligibleCount,
+          simLastRunTotalEntries: counts.totalEntries,
           simLastRunType: "seed",
           simLastError: null,
         },
@@ -586,6 +675,8 @@ r.post(
         contestId,
         deletedBefore,
         created,
+        eligibleCount: counts.eligibleCount,
+        totalEntries: counts.totalEntries,
         paidCountApprox: includeAmoe ? paidCount : created,
         amoeCountApprox: includeAmoe ? created - paidCount : 0,
         resolved: false,
@@ -594,13 +685,12 @@ r.post(
       };
 
       if (!autoResolve) {
-        await auditLog("admin_simulate_cycle_seed_only", { contestId, created }, req);
+        await auditLog("admin_simulate_cycle_seed_only", { contestId, created, eligibleCount: counts.eligibleCount }, req);
         return res.json(out);
       }
 
       const { targetsOut, winner } = await resolveContestWithRandomTargets({ contestId });
-      const trim = await trimWinnersHistory({ simOnly: true });
-
+      await trimWinnersHistory({ simOnly: true });
 
       await db().collection("contests").doc(contestId).set(
         {
@@ -683,7 +773,6 @@ r.post(
       const now = nowMs();
 
       // Seed unpaid
-      const createdDocs = [];
       if (su > 0) {
         const guesses = makeUniqueDaily4Guesses(Math.min(su, MAX_UNIQUE_DAILY4));
 
@@ -692,8 +781,6 @@ r.post(
           const ts = now - randInt(0, SIM_MIN_TS_BACK_MS);
 
           const docId = `simq_${contestId}_${now}_${i}_${Math.random().toString(16).slice(2)}`;
-
-          createdDocs.push(docId);
 
           return {
             _docId: docId,
@@ -740,9 +827,10 @@ r.post(
             countedInContest: true,
             paidAt: nowMs(),
             updatedAt: nowMs(),
+
             // This is where your real flow would have stripe fields:
             // stripeSessionId: "sim_...",
-            // stripePaymentIntentId: "sim_...",
+            // paymentIntentId: "sim_...",
             simPaid: true,
           },
         }));
@@ -767,18 +855,12 @@ r.post(
         }
       }
 
-      // Update contest entryCount based on eligible entries (paid+countedInContest)
-      // (This helps validate your /api/contest derived values.)
-      const snap2 = await col.get();
-      let eligible = 0;
-      snap2.forEach((d) => {
-        const e = d.data() || {};
-        if (isUnifiedEligible(e)) eligible += 1;
-      });
+      // Update contest entryCount based on eligible entries (paid+countedInContest OR AMOE rules)
+      const counts = await computeCountsForContest(contestId);
 
       await db().collection("contests").doc(contestId).set(
         {
-          entryCount: eligible,
+          entryCount: counts.eligibleCount,
           simLastCheckoutRunAt: nowMs(),
           simLastCheckout: {
             seedUnpaid: su,
@@ -807,7 +889,9 @@ r.post(
         cancelOnly: !!cancelOnly,
         runAlreadyPaid: !!runAlreadyPaid,
         alreadyPaidTouched,
-        contestEntryCountSetTo: eligible,
+        contestEntryCountSetTo: counts.eligibleCount,
+        eligibleCount: counts.eligibleCount,
+        totalEntries: counts.totalEntries,
       });
     } catch (e) {
       return res.status(400).json({ ok: false, error: e.message || "Sim checkout failed." });
@@ -847,22 +931,29 @@ r.post(
         if (snap.size < MAX_BATCH_DELETE) break;
       }
 
-      // recompute entryCount from remaining eligible docs
-      const snap2 = await col.get();
-      let eligible = 0;
-      snap2.forEach((d) => {
-        const e = d.data() || {};
-        if (isUnifiedEligible(e)) eligible += 1;
-      });
+      const counts = await computeCountsForContest(contestId);
 
       await db().collection("contests").doc(contestId).set(
-        { entryCount: eligible, simCleanupAt: nowMs(), simCleanupDeleted: deleted },
+        {
+          entryCount: counts.eligibleCount,
+          simCleanupAt: nowMs(),
+          simCleanupDeleted: deleted,
+          simCleanupEligibleCount: counts.eligibleCount,
+          simCleanupTotalEntries: counts.totalEntries,
+        },
         { merge: true }
       );
 
-      await auditLog("admin_sim_cleanup", { contestId, deleted, entryCount: eligible }, req);
+      await auditLog("admin_sim_cleanup", { contestId, deleted, entryCount: counts.eligibleCount }, req);
 
-      return res.json({ ok: true, contestId, deleted, entryCount: eligible });
+      return res.json({
+        ok: true,
+        contestId,
+        deleted,
+        entryCount: counts.eligibleCount,
+        eligibleCount: counts.eligibleCount,
+        totalEntries: counts.totalEntries,
+      });
     } catch (e) {
       return res.status(400).json({ ok: false, error: e.message || "Cleanup failed." });
     }

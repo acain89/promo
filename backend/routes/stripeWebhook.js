@@ -152,6 +152,8 @@ export default function stripeWebhookRouter() {
                 paid: needsPaidWrite ? true : entry.paid,
                 paidAt: needsPaidWrite ? nowMs() : (entry.paidAt ?? null),
                 status: curStatus === "QUEUED" ? entry.status : "QUEUED",
+                // IMPORTANT: force NOT counted so it never becomes eligible
+                countedInContest: false,
                 stripeSessionId: stripeSessionId || entry.stripeSessionId || null,
                 paymentIntentId: paymentIntentId || entry.paymentIntentId || null,
                 lastTouchedAt: nowMs(),
@@ -178,7 +180,7 @@ export default function stripeWebhookRouter() {
               });
             }
 
-            // Apply entryCount increment EXACTLY ONCE
+            // Apply entryCount increment EXACTLY ONCE + set countedInContest TRUE
             const alreadyCounted = entry.countedInContest === true;
             if (contestRef && contest && !alreadyCounted) {
               tx.update(contestRef, {
@@ -204,14 +206,21 @@ export default function stripeWebhookRouter() {
 
       /* =========================================================
          2) Payment Intent Succeeded (backup)
-         NOTE: No contest increments here; only mark paid.
+         IMPORTANT: do NOT make entry eligible here.
+         We mark paid, but force countedInContest=false so eligibility logic won't include it.
       ========================================================== */
       if (event.type === "payment_intent.succeeded") {
         const pi = event.data.object;
 
         await updateEntryByPaymentIntent(
           pi.id,
-          { paid: true, paidAt: nowMs(), status: "PAID", lastTouchedAt: nowMs() },
+          {
+            paid: true,
+            paidAt: nowMs(),
+            status: "PAID_UNCOUNTED",
+            countedInContest: false,
+            lastTouchedAt: nowMs(),
+          },
           "webhook_pi_succeeded",
           pi
         );
@@ -229,6 +238,7 @@ export default function stripeWebhookRouter() {
           pi,
           {
             status: "REFUNDED",
+            countedInContest: false,
             refundedAt: nowMs(),
             refundAmount: charge.amount_refunded ?? null,
             refundCurrency: charge.currency ?? null,
@@ -241,7 +251,7 @@ export default function stripeWebhookRouter() {
 
       /* =========================================================
          4) Disputes
-========================================================= */
+      ========================================================== */
       if (event.type === "charge.dispute.created") {
         const dispute = event.data.object;
         const chargeId = dispute.charge ? String(dispute.charge) : null;
@@ -254,6 +264,7 @@ export default function stripeWebhookRouter() {
             pi,
             {
               status: "DISPUTED",
+              countedInContest: false,
               disputedAt: nowMs(),
               disputeId: dispute.id || null,
               disputeReason: dispute.reason || null,
@@ -273,17 +284,14 @@ export default function stripeWebhookRouter() {
           const charge = await stripe.charges.retrieve(chargeId);
           const pi = charge.payment_intent ? String(charge.payment_intent) : null;
 
-          const finalStatus =
-            dispute.status === "won"
-              ? "PAID"
-              : dispute.status === "lost"
-              ? "REFUNDED"
-              : "DISPUTE_CLOSED";
+          const won = dispute.status === "won";
+          const finalStatus = won ? "PAID" : dispute.status === "lost" ? "REFUNDED" : "DISPUTE_CLOSED";
 
           await updateEntryByPaymentIntent(
             pi,
             {
               status: finalStatus,
+              ...(won ? {} : { countedInContest: false }),
               disputeClosedAt: nowMs(),
               disputeId: dispute.id || null,
               disputeStatus: dispute.status || null,

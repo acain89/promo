@@ -99,6 +99,38 @@ export function cutoffForEntryMs(entryMs) {
 }
 
 /* =========================================================
+   PUBLIC PRIZE CONFIG (config/public)
+   - Admin can set weeklyGuaranteedPrizeCents + weeklyBonusPrizeCents
+========================================================= */
+
+const PRIZE_MAX_CENTS = 1_000_000_00; // safety
+function clampInt(n, lo, hi) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return null;
+  const i = Math.floor(v);
+  if (i < lo) return lo;
+  if (i > hi) return hi;
+  return i;
+}
+
+async function getWeeklyPrizeDefaults() {
+  try {
+    const snap = await db().collection("config").doc("public").get();
+    const d = snap.exists ? (snap.data() || {}) : {};
+
+    const g = clampInt(d.weeklyGuaranteedPrizeCents, 0, PRIZE_MAX_CENTS);
+    const b = clampInt(d.weeklyBonusPrizeCents, 0, PRIZE_MAX_CENTS);
+
+    return {
+      guaranteedPrizeCents: g != null ? g : 10000, // $100
+      bonusPrizeCents: b != null ? b : 0,
+    };
+  } catch {
+    return { guaranteedPrizeCents: 10000, bonusPrizeCents: 0 };
+  }
+}
+
+/* =========================================================
    CONTEST INITIALIZATION
 ========================================================= */
 
@@ -110,21 +142,44 @@ export async function ensureContestForCutoff(cutoffAtMs) {
   const snap = await contestRef.get();
 
   if (!snap.exists) {
-    const defaultPrizeCents = 10000; // $100 guaranteed starting default
+    const { guaranteedPrizeCents, bonusPrizeCents } = await getWeeklyPrizeDefaults();
+    const finalPrizeCents = Number(guaranteedPrizeCents || 0) + Number(bonusPrizeCents || 0);
 
     await contestRef.set({
       id: contestId,
       mode: "DAILY4",
+
       cutoffAt: cutoffAtMs,
       endsOn,
+
       resolved: false,
       resolvedAt: null,
+
+      // end semantics (4-target flow)
+      resolvedBy: null,      // "EXACT" | "CLOSEST"
+      resolvedSlot: null,    // 1..4
+      winner: null,          // snapshot winner for Reveal
+      projectedWinner: null, // running best
+
+      // targets state
+      targets: {},           // { "1": {...}, "2": {...}, "3": {...}, "4": {...} }
+      targetsUpdatedAt: null,
+
+      // legacy compatibility
+      targetNumber: null,
+
       entryCount: 0,
-      guaranteedPrizeCents: defaultPrizeCents,
-      bonusPrizeCents: 0,
-      finalPrizeCents: defaultPrizeCents,
+
+      guaranteedPrizeCents,
+      bonusPrizeCents,
+      finalPrizeCents,
+
+      prizeUpdatedAt: nowMs(),
+
+      // legacy / unused fields (kept if older clients expect them)
       drawResults: [],
       winnerId: null,
+
       activatedAt: null,
       createdAt: nowMs(),
     });
@@ -135,10 +190,11 @@ export async function ensureContestForCutoff(cutoffAtMs) {
       cutoffAt: cutoffAtMs,
       endsOn,
       resolved: false,
+      resolvedAt: null,
       entryCount: 0,
-      guaranteedPrizeCents: defaultPrizeCents,
-      bonusPrizeCents: 0,
-      finalPrizeCents: defaultPrizeCents,
+      guaranteedPrizeCents,
+      bonusPrizeCents,
+      finalPrizeCents,
       activatedAt: null,
     };
   }
@@ -150,6 +206,7 @@ export async function ensureActiveContestNow() {
   const cutoffAt = cutoffForEntryMs(nowMs());
   const contest = await ensureContestForCutoff(cutoffAt);
 
+  // NOTE: "contest/current" is fine as a pointer doc if you use it elsewhere.
   await db().collection("contest").doc("current").set(
     {
       contestId: contest.id,

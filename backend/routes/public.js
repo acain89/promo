@@ -80,6 +80,29 @@ function toSafeInt(n, fallback = 0) {
   return Math.max(0, Math.floor(v));
 }
 
+function targetsToDaily4Draws(targets, resolvedSlot) {
+  const out = { morning: null, day: null, evening: null, night: null };
+  if (!targets || typeof targets !== "object") return out;
+
+  const rs =
+    resolvedSlot != null && Number.isFinite(Number(resolvedSlot)) ? Number(resolvedSlot) : null;
+
+  const setSlot = (slotStr, key) => {
+    const slotNum = Number(slotStr);
+    if (rs && slotNum > rs) return; // ended early; remaining draws not recorded/displayed
+    const t = targets?.[slotStr];
+    const v = t?.target ?? t?.value ?? t?.number ?? null;
+    out[key] = v != null ? padN(v, 4) : null;
+  };
+
+  setSlot("1", "morning");
+  setSlot("2", "day");
+  setSlot("3", "evening");
+  setSlot("4", "night");
+
+  return out;
+}
+
 /* =========================================================
    PUBLIC — CONTEST STATE (ACTIVE CONTEST) — DAILY4 ONLY
 ========================================================= */
@@ -136,7 +159,6 @@ r.get("/api/contest", async (req, res) => {
 
       prizeHeadline,
 
-      // ✅ NEW FIELD
       totalPaidOutCents,
 
       activatedAt: contest.activatedAt ?? null,
@@ -190,6 +212,7 @@ r.get("/api/round-summary", requireUser, async (req, res) => {
 
     const winner = winnerSnap.empty ? null : winnerSnap.docs[0].data();
 
+    // legacy single-target field (may be set when exact hit ends early)
     const targetNumber = contest.targetNumber ? padN(contest.targetNumber, digits) : null;
 
     return res.json({
@@ -241,27 +264,26 @@ r.get("/api/amoe/winners", async (req, res) => {
 
 /* =========================================================
    PUBLIC — REVEAL STATE (ACTIVE PAID CONTEST + AMOE)
-   ✅ Use ensureActiveContestNow() so "Week ending" rolls weekly correctly
-   ✅ Never trust stored contest.endsOn string; always compute from cutoff timestamp
+   ✅ Active contest anchored to cutoffAt (weekly correct)
+   ✅ Includes sequential targets + projectedWinner + stable winner snapshot
+   ✅ If exact match occurs early, later draws are not present (and UI should not show them)
 ========================================================= */
 
 r.get("/api/reveal-state", async (req, res) => {
   try {
     setNoCache(res);
 
-    // ✅ ACTIVE contest (upcoming Saturday), not "most recent cutoff in the past"
     const active = await ensureActiveContestNow();
     const paidId = active?.id || null;
     const activeCutoffAt = active?.cutoffAt ?? null;
 
-    // Try to read the contest doc (should exist because ensureActiveContestNow creates/ensures it)
     let paid = null;
     if (paidId) {
       const paidSnap = await db().collection("contests").doc(paidId).get();
       paid = paidSnap.exists ? paidSnap.data() : null;
     }
 
-    // IMPORTANT: pull winner for THIS contest (not just latest overall)
+    // Winner for THIS contest (historical record)
     const paidWinnerSnap =
       paidId
         ? await db()
@@ -290,20 +312,24 @@ r.get("/api/reveal-state", async (req, res) => {
     const paidFinal = Number(paid?.finalPrizeCents || 0) || paidGuaranteed + paidBonus;
 
     const endsOnMs = paid?.cutoffAt ?? activeCutoffAt ?? null;
-
-    // ✅ Always compute week-ending from cutoff timestamp (no stale strings)
     const endsOnText = endsOnMs ? mmddyyyyFromCutoffMs(endsOnMs) : null;
 
-    // ✅ Lifetime paid-out (manual) from Firestore config/public
     const cfg = await getPublicConfig();
     const totalPaidOutCents = toSafeInt(cfg?.totalPaidOutCents, 0);
+
+    const paidTargets =
+      paid?.targets && typeof paid.targets === "object" ? paid.targets : {};
+
+    const resolvedSlot = paid?.resolvedSlot ?? null;
+
+    // Back-compat convenience for some UIs (and safe fallback for old clients)
+    const daily4Draws = targetsToDaily4Draws(paidTargets, resolvedSlot);
 
     return res.json({
       ok: true,
       serverNow: nowMs(),
       paymentsEnabled: paymentsEnabled(),
 
-      // ✅ NEW FIELD (useful for the frontend to show globally)
       totalPaidOutCents,
 
       paid: paid
@@ -316,7 +342,23 @@ r.get("/api/reveal-state", async (req, res) => {
 
             resolved: !!paid.resolved,
             resolvedAt: paid.resolvedAt ?? null,
+
+            // legacy single-target (keep)
             targetNumber: paid.targetNumber ?? null,
+
+            // sequential targets + running best
+            targets: paidTargets,
+            projectedWinner: paid.projectedWinner ?? null,
+
+            // end semantics
+            resolvedBy: paid.resolvedBy ?? null,
+            resolvedSlot: paid.resolvedSlot ?? null,
+
+            // stable winner snapshot (preferred by UI)
+            winner: paid.winner ?? null,
+
+            // optional back-compat convenience
+            daily4Draws,
 
             guaranteedPrizeCents: paidGuaranteed,
             bonusPrizeCents: paidBonus,
@@ -336,6 +378,14 @@ r.get("/api/reveal-state", async (req, res) => {
             resolvedAt: null,
             targetNumber: null,
 
+            targets: {},
+            projectedWinner: null,
+            resolvedBy: null,
+            resolvedSlot: null,
+            winner: null,
+
+            daily4Draws: { morning: null, day: null, evening: null, night: null },
+
             guaranteedPrizeCents: 0,
             bonusPrizeCents: 0,
             finalPrizeCents: 0,
@@ -343,6 +393,7 @@ r.get("/api/reveal-state", async (req, res) => {
             prizeHeadline: "$100 guaranteed + bonus",
           },
 
+      // historical record (can differ from paid.winner if you ever change formats)
       paidWinner,
 
       amoe: amoeState
@@ -374,6 +425,7 @@ r.get("/api/reveal-state", async (req, res) => {
 
 /* =========================================================
    MY ENTRY — AUTH REQUIRED
+   ✅ contestEndsOn computed from cutoffAt (never stale strings)
 ========================================================= */
 
 r.get("/api/my-entry", requireUser, async (req, res) => {
@@ -392,15 +444,19 @@ r.get("/api/my-entry", requireUser, async (req, res) => {
 
       const c = cSnap.data() || {};
       contestId = qContestId;
-      contestEndsOn = c.endsOn ?? null;
       contestActivatedAt = c.activatedAt ?? null;
+
+      const cutoffAt = c.cutoffAt ?? null;
+      contestEndsOn = cutoffAt ? mmddyyyyFromCutoffMs(cutoffAt) : null;
     } else {
       const contest = await ensureActiveContestNow();
       if (!contest || !contest.id) return res.json({ ok: false });
 
       contestId = contest.id;
-      contestEndsOn = contest.endsOn || null;
       contestActivatedAt = contest.activatedAt ?? null;
+
+      const cutoffAt = contest.cutoffAt ?? null;
+      contestEndsOn = cutoffAt ? mmddyyyyFromCutoffMs(cutoffAt) : null;
     }
 
     const doc = await db().collection("entries").doc(contestId).collection("items").doc(req.user.id).get();

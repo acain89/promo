@@ -5,7 +5,7 @@ import admin from "firebase-admin";
 import requireUser from "../middleware/auth.js";
 import { db } from "../lib/firestore.js";
 import { stripe } from "../lib/stripe.js";
-import { nowMs } from "../lib/utils.js";
+import { nowMs, onlyDigits, normalizeNumber } from "../lib/utils.js";
 
 const r = Router();
 
@@ -14,9 +14,16 @@ const r = Router();
  * - Verifies session is paid
  * - Marks entry PAID (or QUEUED if contest already resolved)
  * - Increments contest entryCount (exactly once)
+ * - ✅ Enforces "first to pay (or AMOE already entered) claims the number"
  *
- * Sweepstakes model:
- * - Prize is guaranteed/admin-set (no pooling math here)
+ * Claim definition:
+ * - A number is "claimed" if there exists ANY OTHER entry in the same contest
+ *   with the same normalized guess AND countedInContest === true.
+ *   (Your AMOE mirror entries set countedInContest=true, and paid confirms set it true too.)
+ *
+ * If Stripe is paid but the number was already claimed by someone else:
+ * - We DO NOT increment contest entryCount
+ * - We DO mark the entry paid, but set status="DUPLICATE" so you can see/refund if needed.
  */
 r.get("/api/checkout/confirm", requireUser, async (req, res) => {
   try {
@@ -72,10 +79,15 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
       .doc(finalEntryId);
 
     const contestRef = db().collection("contests").doc(finalContestId);
+    const entriesCol = db().collection("entries").doc(finalContestId).collection("items");
 
     let changed = false;
     let appliedContestIncrement = false;
     let queued = false;
+
+    // If Stripe is paid but the guess was already claimed by someone else
+    let duplicate = false;
+    let claimedByEntryId = null;
 
     await db().runTransaction(async (tx) => {
       const [entrySnap, contestSnap] = await Promise.all([tx.get(entryRef), tx.get(contestRef)]);
@@ -87,6 +99,12 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
 
       const alreadyPaid = entry.paid === true;
       const alreadyCounted = entry.countedInContest === true;
+
+      // Need the guess to enforce uniqueness
+      const rawGuess = String(entry.guess || "").trim();
+      const d = onlyDigits(rawGuess);
+      if (d.length !== 4) throw new Error("Entry guess is missing/invalid for this session.");
+      const guessNorm = normalizeNumber(Number(d), 4);
 
       // If contest is resolved, do NOT count toward entryCount; mark queued (but still mark paid)
       if (contest.resolved) {
@@ -100,6 +118,8 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
             stripeSessionId: session.id || null,
             paymentIntentId: paymentIntentId || null,
             lastTouchedAt: nowMs(),
+            // normalize guess defensively
+            guess: guessNorm,
           });
           changed = true;
         } else {
@@ -109,9 +129,55 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
             stripeSessionId: session.id || entry.stripeSessionId || null,
             paymentIntentId: paymentIntentId || entry.paymentIntentId || null,
             lastTouchedAt: nowMs(),
+            guess: guessNorm,
           });
         }
         return;
+      }
+
+      // Uniqueness enforcement ONLY when we would newly count this entry.
+      // If this entry is already counted, let confirm be idempotent.
+      if (!alreadyCounted) {
+        // Find any OTHER entry in this contest that already "claims" this number.
+        // Claimed = countedInContest === true (covers PAID confirmed + AMOE inserted)
+        const q = entriesCol
+          .where("guess", "==", guessNorm)
+          .where("countedInContest", "==", true)
+          .limit(2);
+
+        const qSnap = await tx.get(q);
+
+        if (!qSnap.empty) {
+          const other = qSnap.docs.find((doc) => doc.id !== finalEntryId);
+          if (other) {
+            duplicate = true;
+            claimedByEntryId = other.id;
+
+            // Stripe is paid, but the number is already claimed by someone else.
+            // Record as paid but NOT counted (admin can refund if desired).
+            tx.update(entryRef, {
+              paid: true,
+              paidAt: alreadyPaid ? entry.paidAt ?? nowMs() : nowMs(),
+              status: "DUPLICATE",
+
+              countedInContest: false,
+              countedAt: entry.countedAt ?? null,
+
+              duplicateOfEntryId: other.id,
+              duplicateGuess: guessNorm,
+
+              stripeSessionId: session.id || entry.stripeSessionId || null,
+              paymentIntentId: paymentIntentId || entry.paymentIntentId || null,
+              lastTouchedAt: nowMs(),
+
+              // keep guess normalized in case older docs stored weirdly
+              guess: guessNorm,
+            });
+
+            changed = true;
+            return;
+          }
+        }
       }
 
       // Mark entry paid (idempotent)
@@ -123,6 +189,8 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
           stripeSessionId: session.id || null,
           paymentIntentId: paymentIntentId || null,
           lastTouchedAt: nowMs(),
+          // keep guess normalized in case older docs stored weirdly
+          guess: guessNorm,
         });
         changed = true;
       } else {
@@ -130,6 +198,7 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
           stripeSessionId: session.id || entry.stripeSessionId || null,
           paymentIntentId: paymentIntentId || entry.paymentIntentId || null,
           lastTouchedAt: nowMs(),
+          guess: guessNorm,
         });
       }
 
@@ -153,6 +222,8 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
       ok: true,
       paid: true,
       queued,
+      duplicate,
+      claimedByEntryId,
       updated: changed,
       contestIncremented: appliedContestIncrement,
       contestId: finalContestId,

@@ -156,11 +156,34 @@ async function deleteCollectionInBatches(colRef, batchSize = 400) {
 
     deleted += snap.size;
 
-    // If less than batchSize, we're done
     if (snap.size < batchSize) break;
   }
 
   return deleted;
+}
+
+/**
+ * Trim a collection by resolvedAt desc, keep newest HISTORY_LIMIT.
+ * Uses a bounded query so we don’t scan the whole collection.
+ */
+async function trimByResolvedAt(collectionName, keep = HISTORY_LIMIT) {
+  const cap = Math.max(0, Number(keep || 0));
+  // Fetch only enough to know what to delete (keep + up to 300 extra)
+  const snap = await db()
+    .collection(collectionName)
+    .orderBy("resolvedAt", "desc")
+    .limit(cap + 300)
+    .get();
+
+  if (snap.empty) return 0;
+
+  const extra = snap.docs.slice(cap);
+  if (!extra.length) return 0;
+
+  const batch = db().batch();
+  extra.forEach((d) => batch.delete(d.ref));
+  await batch.commit();
+  return extra.length;
 }
 
 /* =========================================================
@@ -182,7 +205,6 @@ function safeCents(v) {
 
 async function getTotalPaidCents() {
   try {
-    // ✅ Prefer config/public.totalPaidOutCents (Landing source of truth)
     const pubSnap = await PUBLIC_CFG_REF().get();
     if (pubSnap.exists) {
       const d = pubSnap.data() || {};
@@ -191,13 +213,11 @@ async function getTotalPaidCents() {
     }
   } catch {}
 
-  // Fallback to legacy stats/global.totalPaidCents
   try {
     const snap = await GLOBAL_STATS_REF().get();
     if (!snap.exists) return 0;
     const d = snap.data() || {};
-    const v = safeCents(d.totalPaidCents);
-    return v;
+    return safeCents(d.totalPaidCents);
   } catch {
     return 0;
   }
@@ -218,12 +238,9 @@ async function addToTotalPaidCents(addCents) {
     const pubCur = pubSnap.exists ? safeCents((pubSnap.data() || {}).totalPaidOutCents) : 0;
     const statsCur = statsSnap.exists ? safeCents((statsSnap.data() || {}).totalPaidCents) : 0;
 
-    // ✅ Make config/public the canonical base if present; otherwise use legacy
     const base = pubSnap.exists ? pubCur : statsCur;
-
     const next = Math.min(TOTAL_PAID_CAP_CENTS, base + inc);
 
-    // ✅ Update BOTH (so Admin + Landing stay synced, and old code still works)
     tx.set(pubRef, { totalPaidOutCents: next, updatedAt: nowMs() }, { merge: true });
     tx.set(statsRef, { totalPaidCents: next, updatedAt: nowMs() }, { merge: true });
   });
@@ -261,7 +278,7 @@ async function getPrizeConfig() {
   const bonus = clampInt(d.weeklyBonusPrizeCents, 0, PRIZE_MAX_CENTS);
 
   return {
-    weeklyGuaranteedPrizeCents: guaranteed != null ? guaranteed : 10000, // $100 default
+    weeklyGuaranteedPrizeCents: guaranteed != null ? guaranteed : 10000,
     weeklyBonusPrizeCents: bonus != null ? bonus : 0,
   };
 }
@@ -449,55 +466,6 @@ r.post(
 );
 
 /* =========================================================
-   ADMIN — USER LOOKUP (EMAIL + PHONE BY USERNAME)
-========================================================= */
-
-function cleanUsername(s) {
-  return String(s || "").trim();
-}
-function okUsername(un) {
-  return /^[a-zA-Z0-9_]{2,24}$/.test(un);
-}
-
-r.post(
-  "/api/admin/user-lookup",
-  requireAdmin,
-  rateLimit({ routeKey: "admin_user_lookup", limit: 120, windowMs: 15 * 60 * 1000 }),
-  async (req, res) => {
-    try {
-      const username = cleanUsername(req.body?.username);
-      if (!username || !okUsername(username)) {
-        return res.status(400).json({ ok: false, error: "Invalid username." });
-      }
-
-      const unLower = username.toLowerCase();
-
-      const snap = await db().collection("users").where("usernameLower", "==", unLower).limit(1).get();
-      if (snap.empty) {
-        await auditLog("admin_user_lookup", { ok: false, usernameLower: unLower }, req);
-        return res.status(404).json({ ok: false, error: "User not found." });
-      }
-
-      const doc = snap.docs[0];
-      const u = doc.data() || {};
-
-      const user = {
-        id: doc.id,
-        username: u.username || username,
-        email: u.email || null,
-        phone: u.phone || u.phoneNumber || u.mobile || null,
-      };
-
-      await auditLog("admin_user_lookup", { ok: true, userId: doc.id, usernameLower: unLower }, req);
-
-      return res.json({ ok: true, user });
-    } catch (e) {
-      return res.status(500).json({ ok: false, error: e.message || "Lookup failed." });
-    }
-  }
-);
-
-/* =========================================================
    ADMIN — COMBINED STATE (ACTIVE CONTEST + AMOE STATE)
 ========================================================= */
 
@@ -528,9 +496,7 @@ r.post(
 
       const { state: amoeState } = await getOrInitAmoeState();
 
-      // ✅ This now matches Landing source-of-truth (config/public.totalPaidOutCents)
       const totalPaidCents = await getTotalPaidCents();
-
       const prizeCfg = await getPrizeConfig();
 
       const activeGuaranteed = Number(active.guaranteedPrizeCents || prizeCfg.weeklyGuaranteedPrizeCents || 0);
@@ -541,7 +507,6 @@ r.post(
       const lastBonus = Number(lastContest?.bonusPrizeCents || 0);
       const lastFinal = Number(lastContest?.finalPrizeCents || 0) || lastGuaranteed + lastBonus;
 
-      // New fields for 4-target flow (if present)
       const targets = active.targets || {};
       const projected = active.projectedWinner || null;
 
@@ -598,7 +563,6 @@ r.post(
         amoe: {
           cycleId: amoeState.cycleId ?? 1,
           status: amoeState.status || "COLLECTING",
-          // UI will display just the count; we keep targetCount for internal/reference
           count: Number(amoeState.count || 0),
           reachedAt: amoeState.reachedAt ?? null,
           resolvedAt: amoeState.resolvedAt ?? null,
@@ -616,8 +580,8 @@ r.post(
 /* =========================================================
    UNIFIED RESOLVE ENGINE (PAID + AMOE)
    - 4-digit targets only
-   - Tie-break: same DFT -> earlier timestamp wins
-   - Exact match: resolves contest + writes winner record
+   - Tie-break: same diff -> earlier timestamp wins
+   - Exact match: resolves contest early
    - Otherwise: updates projectedWinner (best so far)
 ========================================================= */
 
@@ -636,15 +600,14 @@ async function computeUnifiedBest({ contestId, targetNumber }) {
     const e = doc.data();
     if (!isUnifiedEligible(e)) return;
 
-    eligibleCount += 1;
-
     const guessNum = parse4DigitNumber(e.guess);
     if (guessNum == null) return;
+
+    eligibleCount += 1;
 
     const diff = absDiff(guessNum, target);
     const ts = Number(e.timestamp || e.createdAt || 0) || 0;
 
-    // Tie-break rule: same diff => earlier timestamp wins
     if (!best || diff < best.diff || (diff === best.diff && ts < best.timestamp)) {
       best = {
         id: doc.id,
@@ -681,6 +644,9 @@ r.post(
       const s = clampInt(slot, 1, 4);
       if (s == null) throw new Error("Invalid slot. Must be 1–4.");
 
+      // Compute best OUTSIDE the transaction (avoid non-tx reads inside tx callback)
+      const r0 = await computeUnifiedBest({ contestId: id, targetNumber });
+
       const contestRef = db().collection("contests").doc(id);
 
       const result = await db().runTransaction(async (tx) => {
@@ -690,18 +656,13 @@ r.post(
         const contest = contestSnap.data() || {};
         if (contest.resolved) throw new Error("Already resolved.");
 
-        // lock-per-slot
         const targets = contest.targets && typeof contest.targets === "object" ? contest.targets : {};
         const slotKey = String(s);
         if (targets[slotKey]?.locked) throw new Error("That target slot is already locked.");
 
-        // Compute best for this target against all eligible entries
-        const r0 = await computeUnifiedBest({ contestId: id, targetNumber });
-
         const drawLabel = slotToLabel(s);
         const playedAt = nowMs();
 
-        // Compare against current projected winner (best so far)
         const curProj = contest.projectedWinner || null;
         const curDiff = curProj ? Number(curProj.diff ?? curProj.dft ?? 1e9) : 1e9;
         const curTs = curProj ? Number(curProj.entryTimestamp ?? curProj.timestamp ?? 9e15) : 9e15;
@@ -730,7 +691,6 @@ r.post(
             }
           : curProj;
 
-        // lock target slot
         const nextTargets = { ...targets };
         nextTargets[slotKey] = {
           target: r0.targetNorm,
@@ -740,10 +700,9 @@ r.post(
           submittedAt: nowMs(),
         };
 
-        // Exact match = resolve contest + write winners record outside tx (we return payload)
         const exactHit = !!r0.best.exact;
+        const finalizeByClosest = !exactHit && s === 4;
 
-        // Patch contest
         const patch = {
           mode: "DAILY4",
           targets: nextTargets,
@@ -751,10 +710,17 @@ r.post(
           targetsUpdatedAt: nowMs(),
         };
 
-        if (exactHit) {
+        if (exactHit || finalizeByClosest) {
           patch.resolved = true;
           patch.resolvedAt = nowMs();
-          patch.targetNumber = r0.targetNorm; // legacy field: last submitted target
+          patch.resolvedBy = exactHit ? "EXACT" : "CLOSEST";
+          patch.resolvedSlot = s;
+
+          // legacy
+          patch.targetNumber = exactHit ? r0.targetNorm : (projectedWinner?.target ?? r0.targetNorm);
+
+          // snapshot
+          patch.winner = projectedWinner || null;
         }
 
         tx.set(contestRef, patch, { merge: true });
@@ -766,6 +732,11 @@ r.post(
           playedAt,
           target: r0.targetNorm,
           exactHit,
+
+          finalized: exactHit || finalizeByClosest,
+          finalizedBy: exactHit ? "EXACT" : finalizeByClosest ? "CLOSEST" : null,
+          finalizedSlot: exactHit || finalizeByClosest ? s : null,
+
           best: {
             winnerUN: r0.best.username || r0.best.name || r0.best.email || "—",
             winnerUserId: r0.best.userId || null,
@@ -780,8 +751,7 @@ r.post(
         };
       });
 
-      // If exact match: write winner record and trim history
-      if (result.exactHit) {
+      if (result.finalized) {
         const contestSnap = await db().collection("contests").doc(result.contestId).get();
         const contest = contestSnap.exists ? (contestSnap.data() || {}) : {};
 
@@ -789,31 +759,33 @@ r.post(
         const bonus = Number(contest.bonusPrizeCents || 0);
         const finalPrize = Number(contest.finalPrizeCents || 0) || guaranteed + bonus;
 
+        const proj = contest.winner || contest.projectedWinner || result.projectedWinner || null;
+        if (!proj) throw new Error("No winner could be determined.");
+
         const record = {
           contestId: result.contestId,
           endsOn: contest.endsOn || null,
           mode: "DAILY4",
 
-          // winning draw info
-          target: result.target,
-          drawLabel: result.drawLabel,
-          playedAt: result.playedAt,
+          resolvedBy: contest.resolvedBy || result.finalizedBy || (result.exactHit ? "EXACT" : "CLOSEST"),
+          resolvedSlot: Number(contest.resolvedSlot || result.finalizedSlot || result.slot),
 
-          // winner
-          winnerUN: result.best.winnerUN,
-          winnerUserId: result.best.winnerUserId || null,
-          source: result.best.source || null,
-          guess: result.best.guess,
-          diff: result.best.diff,
-          exact: true,
-          entryTimestamp: result.best.entryTimestamp,
+          target: proj.target || null,
+          drawLabel: proj.drawLabel || null,
+          playedAt: proj.playedAt || null,
 
-          // payouts
+          winnerUN: proj.winnerUN || "—",
+          winnerUserId: proj.winnerUserId || null,
+          source: proj.source || null,
+          guess: proj.guess || null,
+          diff: Number(proj.diff ?? 0),
+          exact: !!proj.exact,
+          entryTimestamp: Number(proj.entryTimestamp ?? 0),
+
           guaranteedPrizeCents: guaranteed,
           bonusPrizeCents: bonus,
           finalPrizeCents: finalPrize,
 
-          // metadata
           resolvedAt: nowMs(),
           eligibleCount: result.eligibleCount,
           totalEntries: result.totalEntries,
@@ -821,14 +793,18 @@ r.post(
 
         await db().collection("winners").add(record);
 
-        const winnersSnap = await db().collection("winners").orderBy("resolvedAt", "desc").get();
-        const batch = db().batch();
-        winnersSnap.docs.slice(HISTORY_LIMIT).forEach((d) => batch.delete(d.ref));
-        await batch.commit();
+        await trimByResolvedAt("winners", HISTORY_LIMIT);
 
         await auditLog(
-          "admin_targets_exact_resolve",
-          { contestId: result.contestId, slot: result.slot, target: result.target, finalPrizeCents: finalPrize },
+          "admin_targets_finalize",
+          {
+            contestId: result.contestId,
+            slot: result.slot,
+            finalizedBy: record.resolvedBy,
+            winnerUN: record.winnerUN,
+            target: record.target,
+            diff: record.diff,
+          },
           req
         );
 
@@ -861,38 +837,43 @@ r.post(
       const { contestId } = req.body || {};
       const id = pickContestIdOrLast(contestId);
 
-      // Make sure contest exists
       const contestRef = db().collection("contests").doc(id);
       const contestSnap = await contestRef.get();
       if (!contestSnap.exists) return res.status(400).json({ ok: false, error: "No such contest." });
 
-      // 1) Delete contest entry pool (paid + AMOE mirror)
       const entriesCol = db().collection("entries").doc(id).collection("items");
       const deletedContestEntries = await deleteCollectionInBatches(entriesCol, 400);
 
-      // 2) Delete AMOE entries in current cycle (legacy storage)
       const { ref: stateRef, state } = await getOrInitAmoeState();
       const curCycleId = Number(state.cycleId || 1);
       const amoeCol = db().collection("amoeEntries").doc(String(curCycleId)).collection("items");
       const deletedAmoeEntries = await deleteCollectionInBatches(amoeCol, 400);
 
-      // 3) Reset contest core fields (keep prize config fields intact)
       await contestRef.set(
         {
           mode: "DAILY4",
+
           resolved: false,
           resolvedAt: null,
-          targetNumber: null, // legacy
+
+          // new 4-target flow fields
+          resolvedBy: null,
+          resolvedSlot: null,
+          winner: null,
+
+          // legacy
+          targetNumber: null,
+
           targets: {},
           projectedWinner: null,
           targetsUpdatedAt: null,
+
           entryCount: 0,
           resetAt: nowMs(),
         },
         { merge: true }
       );
 
-      // 4) Advance AMOE cycle + reset state
       const nextCycle = curCycleId + 1;
       await stateRef.set(
         {
@@ -957,9 +938,13 @@ async function computePaidWinner({ contestId, targetNumber }) {
   entriesSnap.forEach((doc) => {
     const e = doc.data();
     if (!isPaidEntryEligible(e)) return;
+
+    const guessNum = parse4DigitNumber(e.guess);
+    if (guessNum == null) return;
+
     eligibleCount += 1;
 
-    const diff = absDiff(parse4DigitNumber(e.guess) ?? e.guess, target);
+    const diff = absDiff(guessNum, target);
     const ts = Number(e.timestamp || e.createdAt || 0) || 0;
 
     if (!winner || diff < winner.diff || (diff === winner.diff && ts < Number(winner.timestamp || 0))) {
@@ -1059,10 +1044,7 @@ r.post(
 
       await db().collection("winners").add(record);
 
-      const winnersSnap = await db().collection("winners").orderBy("resolvedAt", "desc").get();
-      const batch = db().batch();
-      winnersSnap.docs.slice(HISTORY_LIMIT).forEach((d) => batch.delete(d.ref));
-      await batch.commit();
+      await trimByResolvedAt("winners", HISTORY_LIMIT);
 
       await contestRef.set(
         {
@@ -1127,7 +1109,6 @@ r.post(
 
       const cycleId = Number(state.cycleId || 1);
 
-      // Keep legacy AMOE cycle duplicate check (email unique per cycle)
       const dupeSnap = await db()
         .collection("amoeEntries")
         .doc(String(cycleId))
@@ -1140,7 +1121,6 @@ r.post(
         return res.status(400).json({ error: "An AMOE entry already exists for this email in the current cycle." });
       }
 
-      // 1) Store in legacy AMOE storage
       const entryDoc = await db()
         .collection("amoeEntries")
         .doc(String(cycleId))
@@ -1156,7 +1136,6 @@ r.post(
           createdAt: nowMs(),
         });
 
-      // 2) ALSO store into the active contest entry pool
       const active = await ensureActiveContestNow();
       if (active?.id) {
         await db()
@@ -1208,7 +1187,6 @@ r.post(
   }
 );
 
-// Legacy AMOE preview/resolve kept (safe), but still uses 4-digit range now.
 async function computeAmoeWinner({ targetNumber }) {
   const { ref: stateRef, state } = await getOrInitAmoeState();
   const cycleId = Number(state.cycleId || 1);
@@ -1294,10 +1272,7 @@ r.post(
 
       await db().collection("amoeWinners").add(record);
 
-      const winnersSnap = await db().collection("amoeWinners").orderBy("resolvedAt", "desc").get();
-      const batch = db().batch();
-      winnersSnap.docs.slice(HISTORY_LIMIT).forEach((d) => batch.delete(d.ref));
-      await batch.commit();
+      await trimByResolvedAt("amoeWinners", HISTORY_LIMIT);
 
       await r0.stateRef.set(
         {
@@ -1398,6 +1373,9 @@ r.post(
           targetNumber: contest.targetNumber ?? null,
           targets: contest.targets ?? {},
           projectedWinner: contest.projectedWinner ?? null,
+          winner: contest.winner ?? null,
+          resolvedBy: contest.resolvedBy ?? null,
+          resolvedSlot: contest.resolvedSlot ?? null,
           entryCount: Number(contest.entryCount || 0),
           guaranteedPrizeCents: guaranteed,
           bonusPrizeCents: bonus,
