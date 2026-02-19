@@ -2,7 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import PanelShell from "../ui/PanelShell.jsx";
-import { apiGet, authMe } from "../lib/api.js";
+import { apiGet, authMe, authLogout } from "../lib/api.js";
 
 function onlyDigits(s) {
   return String(s ?? "").replace(/[^\d]/g, "");
@@ -15,13 +15,13 @@ function pad4(raw) {
 }
 
 function formatDateTime(ts) {
-  if (!ts) return "—";
+  if (!ts) return "";
   try {
     const d = new Date(ts);
-    if (Number.isNaN(d.getTime())) return "—";
+    if (Number.isNaN(d.getTime())) return "";
     return d.toLocaleString();
   } catch {
-    return "—";
+    return "";
   }
 }
 
@@ -135,6 +135,28 @@ function StatPill({ label, value }) {
   );
 }
 
+function Row({ label, value }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, lineHeight: 1.1 }}>
+      <span className="label">{label}</span>
+      <span className="value" style={{ textAlign: "right" }}>
+        {value && String(value).length ? value : <span style={{ opacity: 0.25 }}>&nbsp;</span>}
+      </span>
+    </div>
+  );
+}
+
+function normalizeEndsOnText(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return null;
+
+  // Upcoming Saturday is 02/21/26 (not 02/14/26)
+  // If backend sends the old date string, fix it here so UI is correct.
+  if (s.includes("02/14/26")) return s.replaceAll("02/14/26", "02/21/26");
+
+  return s;
+}
+
 export default function Reveal() {
   const nav = useNavigate();
 
@@ -151,10 +173,23 @@ export default function Reveal() {
   const [proj, setProj] = useState(null);
 
   // My status (requires login)
-  const [meGuess, setMeGuess] = useState(null);
+  const [meUser, setMeUser] = useState(null);
+  const [myEntry, setMyEntry] = useState(null); // store full entry so we can show timestamp, etc.
 
   const pollRef = useRef(null);
   const mountedRef = useRef(false);
+
+  async function doLogout() {
+    try {
+      setBusy(true);
+      await authLogout();
+    } catch {
+      // ignore
+    } finally {
+      setBusy(false);
+      nav("/"); // safe landing
+    }
+  }
 
   async function refresh({ silent = false } = {}) {
     try {
@@ -164,13 +199,16 @@ export default function Reveal() {
       }
 
       let ok = false;
+      let me = null;
       try {
-        const m = await authMe();
-        ok = !!m?.ok;
+        me = await authMe();
+        ok = !!me?.ok;
       } catch {
         ok = false;
+        me = null;
       }
       setAuthed(ok);
+      setMeUser(ok ? me?.user || me?.me || null : null);
 
       const rs = await apiGet("/api/reveal-state");
       setState(rs && typeof rs === "object" ? rs : null);
@@ -179,9 +217,6 @@ export default function Reveal() {
       setDraws(d);
 
       // Projected winner: accept whatever backend returns, but don’t break if missing.
-      // Preferred shapes:
-      // - rs.projectedWinner { username, guess, bestDft, bestDraw }
-      // - rs.leaderboard[0]  { username, guess, bestDft, bestDraw }
       const pw =
         rs?.projectedWinner ||
         (Array.isArray(rs?.leaderboard) && rs.leaderboard[0]) ||
@@ -204,12 +239,13 @@ export default function Reveal() {
       if (ok) {
         try {
           const my = await apiGet("/api/my-entry");
-          setMeGuess(my?.ok ? my?.entry?.guess : null);
+          if (my?.ok) setMyEntry(my?.entry || null);
+          else setMyEntry(null);
         } catch {
-          setMeGuess(null);
+          setMyEntry(null);
         }
       } else {
-        setMeGuess(null);
+        setMyEntry(null);
       }
     } catch (e) {
       if (!silent) setErr(e?.message || "Failed to load reveal.");
@@ -244,6 +280,8 @@ export default function Reveal() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const meGuess = myEntry?.guess ?? myEntry?.entry ?? myEntry?.submission ?? null;
+
   const myStats = useMemo(() => {
     if (!authed || !meGuess) return null;
     return computeMyDfts(meGuess, draws);
@@ -259,13 +297,47 @@ export default function Reveal() {
     return proj.bestDraw;
   }, [proj?.bestDraw]);
 
-  // Optional contest text (safe fallbacks)
-  const endsOn =
+  const endsOnRaw =
     state?.endsOn ||
     state?.contest?.endsOn ||
     state?.paid?.endsOn ||
     state?.contest?.endsOnText ||
     null;
+
+  const endsOn = useMemo(() => normalizeEndsOnText(endsOnRaw), [endsOnRaw]);
+
+  const myUsername = useMemo(() => {
+    const u = meUser;
+    if (!u) return "";
+    return String(u.username || u.un || u.name || u.displayName || "").trim();
+  }, [meUser]);
+
+  const isCurrentWinner = useMemo(() => {
+    if (!authed) return null;
+    if (!myUsername || !proj?.username || proj.username === "—") return null;
+    return proj.username === myUsername;
+  }, [authed, myUsername, proj?.username]);
+
+  function dftLine(k) {
+    const dft = myStats?.by?.[k];
+    if (typeof dft === "number") {
+      if (dft === 0) return "Exact! You win!";
+      return String(dft);
+    }
+    return "";
+  }
+
+  const topBtnStyle = {
+    borderRadius: 10,
+    padding: "6px 10px",
+    fontSize: 12,
+    fontWeight: 800,
+    lineHeight: 1,
+    border: "1px solid rgba(255,255,255,0.12)",
+    background: "rgba(255,255,255,0.04)",
+    color: "inherit",
+    cursor: "pointer",
+  };
 
   return (
     <PanelShell
@@ -286,24 +358,46 @@ export default function Reveal() {
       }
     >
       <div style={{ display: "grid", gap: 12 }}>
-        {/* Top: title + slogan (no Home/Back/Logout buttons) */}
-        <div
-          style={{
-            fontSize: 34,
-            fontWeight: 900,
-            letterSpacing: "0.06em",
-            color: "var(--accent)",
-            marginTop: 10,
-            textAlign: "left",
-          }}
-        >
-          drawnfray
-        </div>
+        {/* Top: Back + Logout + centered title */}
+        <div style={{ position: "relative", paddingTop: 6 }}>
+          <button
+            type="button"
+            style={{ ...topBtnStyle, position: "absolute", top: 0, left: 0 }}
+            onClick={() => nav(-1)}
+            disabled={busy}
+            aria-label="Back"
+          >
+            Back
+          </button>
 
-        <div style={{ fontSize: 13, letterSpacing: "0.14em", marginTop: -6 }}>
-          <span style={{ color: "#9ad7ff" }}>Select.</span>{" "}
-          <span style={{ color: "#c6a7ff" }}>Submit.</span>{" "}
-          <span style={{ color: "#7affc2" }}>Reveal.</span>
+          <button
+            type="button"
+            style={{ ...topBtnStyle, position: "absolute", top: 0, right: 0 }}
+            onClick={doLogout}
+            disabled={busy}
+            aria-label="Log out"
+          >
+            Log Out
+          </button>
+
+          <div
+            style={{
+              fontSize: 34,
+              fontWeight: 900,
+              letterSpacing: "0.06em",
+              color: "var(--accent)",
+              marginTop: 10,
+              textAlign: "center",
+            }}
+          >
+            drawnfray
+          </div>
+
+          <div style={{ fontSize: 13, letterSpacing: "0.14em", marginTop: -6, textAlign: "center" }}>
+            <span style={{ color: "#9ad7ff" }}>Select.</span>{" "}
+            <span style={{ color: "#c6a7ff" }}>Submit.</span>{" "}
+            <span style={{ color: "#7affc2" }}>Reveal.</span>
+          </div>
         </div>
 
         {endsOn ? (
@@ -369,7 +463,7 @@ export default function Reveal() {
                 {proj.timestamp ? (
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
                     <span className="label">Timestamp</span>
-                    <span className="value">{formatDateTime(proj.timestamp)}</span>
+                    <span className="value">{formatDateTime(proj.timestamp) || "—"}</span>
                   </div>
                 ) : null}
               </div>
@@ -407,96 +501,34 @@ export default function Reveal() {
                 </button>
               </div>
             </div>
-          ) : !myStats || !myStats.guess || myStats.guess === "—" ? (
-            <div style={{ display: "grid", gap: 10, textAlign: "center" }}>
-              <div className="miniMuted">No submission found for your account.</div>
-              <div className="form" style={{ marginTop: 0 }}>
-                <button className="secondary" onClick={() => nav("/profile")} disabled={busy || loading}>
-                  Go to Profile
-                </button>
-              </div>
-            </div>
           ) : (
             <div
               style={{
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,0.10)",
+                background: "rgba(255,255,255,0.02)",
+                padding: 8,
                 display: "grid",
-                gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)",
-                gap: 10,
+                gap: 3,
+                fontSize: 13,
+                lineHeight: 1.1,
               }}
             >
-              {/* Left: submission + best */}
-              <div
-                style={{
-                  borderRadius: 12,
-                  border: "1px solid rgba(255,255,255,0.10)",
-                  background: "rgba(255,255,255,0.02)",
-                  padding: 12,
-                  display: "grid",
-                  gap: 10,
-                  alignContent: "start",
-                }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span className="label">Submission</span>
-                  <span className="value" style={{ letterSpacing: "0.14em", fontVariantNumeric: "tabular-nums" }}>
-                    {myStats.guess}
-                  </span>
-                </div>
+              <Row label="UN:" value={myUsername} />
+              <Row label="Entry:" value={myStats?.guess && myStats.guess !== "—" ? myStats.guess : ""} />
+              <Row
+                label="Timestamp:"
+                value={formatDateTime(myEntry?.timestamp || myEntry?.submittedAt || myEntry?.entryTimestamp || "")}
+              />
 
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span className="label">Best DFT</span>
-                  <span className="value">{myStats.best ?? "—"}</span>
-                </div>
+              <Row label="DFT Morning:" value={dftLine("morning")} />
+              <Row label="DFT Day:" value={dftLine("day")} />
+              <Row label="DFT Evening:" value={dftLine("evening")} />
+              <Row label="DFT Night:" value={dftLine("night")} />
 
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span className="label">From draw</span>
-                  <span className="value">{myStats.bestLabel ? labelNice(myStats.bestLabel) : "—"}</span>
-                </div>
-              </div>
+              <Row label="Current Winner:" value={isCurrentWinner === null ? "" : isCurrentWinner ? "Yes" : "No"} />
 
-              {/* Right: 4 mini sections */}
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
-                {["morning", "day", "evening", "night"].map((k) => {
-                  const target = draws[k];
-                  const dft = myStats.by[k];
-
-                  return (
-                    <div
-                      key={k}
-                      style={{
-                        borderRadius: 12,
-                        border: "1px solid rgba(255,255,255,0.10)",
-                        background: "rgba(255,255,255,0.02)",
-                        padding: 12,
-                        minHeight: 76,
-                        display: "grid",
-                        alignContent: "center",
-                        gap: 6,
-                      }}
-                    >
-                      <div style={{ fontSize: 10, letterSpacing: "0.16em", textTransform: "uppercase", opacity: 0.7 }}>
-                        {labelNice(k)}
-                      </div>
-
-                      <div
-                        style={{
-                          fontSize: 14,
-                          fontWeight: 900,
-                          letterSpacing: "0.12em",
-                          fontVariantNumeric: "tabular-nums",
-                          opacity: target === "—" ? 0.25 : 1,
-                        }}
-                      >
-                        {target === "—" ? "—" : target}
-                      </div>
-
-                      <div className="miniMuted" style={{ opacity: target === "—" ? 0.25 : 0.85 }}>
-                        {target === "—" ? "DFT: —" : `DFT: ${dft ?? "—"}`}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+              {/* removed "Go to Profile" button entirely */}
             </div>
           )}
         </div>

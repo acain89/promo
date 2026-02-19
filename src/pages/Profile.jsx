@@ -18,6 +18,23 @@ function formatDateTime(ts) {
   return new Date(ts).toLocaleString();
 }
 
+// ✅ Always format contest week-ending from the authoritative cutoff timestamp (Chicago time)
+function formatEndsOnChicagoFromMs(ms) {
+  if (!ms) return "—";
+  try {
+    const d = new Date(Number(ms));
+    if (Number.isNaN(d.getTime())) return "—";
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Chicago",
+      month: "2-digit",
+      day: "2-digit",
+      year: "2-digit",
+    }).format(d);
+  } catch {
+    return "—";
+  }
+}
+
 // Stripe feature flag (frontend)
 const STRIPE_ENABLED =
   String(import.meta.env.VITE_STRIPE_ENABLED || "").toLowerCase().trim() === "true";
@@ -278,7 +295,10 @@ export default function Profile() {
     }
   }
 
-  const entryStatusUpper = useMemo(() => String(myEntry?.status || "").toUpperCase(), [myEntry?.status]);
+  const entryStatusUpper = useMemo(
+    () => String(myEntry?.status || "").toUpperCase(),
+    [myEntry?.status]
+  );
 
   const paidLocked =
     !!myEntry?.paid ||
@@ -296,7 +316,12 @@ export default function Profile() {
 
     try {
       // Stripe success -> confirm once (then we bootstrap fresh)
-      if (STRIPE_ENABLED && checkoutResult === "success" && checkoutSessionId && !didConfirmRef.current) {
+      if (
+        STRIPE_ENABLED &&
+        checkoutResult === "success" &&
+        checkoutSessionId &&
+        !didConfirmRef.current
+      ) {
         didConfirmRef.current = true;
         try {
           await apiGet(`/api/checkout/confirm?session_id=${encodeURIComponent(checkoutSessionId)}`);
@@ -362,10 +387,12 @@ export default function Profile() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const cutoffAt = contest?.cutoffAt ?? null;
-  const endsOn = contest?.endsOn ?? null;
+  // Prefer authoritative cutoff timestamp; don't rely on endsOn text.
+  const cutoffAt = contest?.cutoffAt ?? contest?.endsOnMs ?? null;
+  const endsOn = useMemo(() => formatEndsOnChicagoFromMs(cutoffAt), [cutoffAt]);
 
-  const canProceed = !loading && !busy && !locked && !!cutoffAt && onlyDigits(guessRaw).length === DIGITS;
+  const canProceed =
+    !loading && !busy && !locked && !!cutoffAt && onlyDigits(guessRaw).length === DIGITS;
 
   async function beginCheckout(useExistingGuess = false) {
     if (!STRIPE_ENABLED) {
@@ -421,7 +448,9 @@ export default function Profile() {
       }}
       aria-label="No purchase necessary disclosure"
     >
-      <div style={{ fontWeight: 900, letterSpacing: "0.02em", marginBottom: 6 }}>No purchase necessary.</div>
+      <div style={{ fontWeight: 900, letterSpacing: "0.02em", marginBottom: 6 }}>
+        No purchase necessary.
+      </div>
       <div className="miniMuted" style={{ marginBottom: 6 }}>
         Free mail-in entry option available. Void where prohibited.
       </div>
@@ -515,14 +544,20 @@ export default function Profile() {
             </div>
           </div>
 
-          {loading ? <div className="fineprint" style={{ textAlign: "center" }}>Loading…</div> : null}
+          {loading ? (
+            <div className="fineprint" style={{ textAlign: "center" }}>
+              Loading…
+            </div>
+          ) : null}
           {err ? <div className="error">{err}</div> : null}
           {status ? <div className="fineprint">{status}</div> : null}
 
           {!loading && me ? (
             <>
               <div style={{ display: "grid", gap: 8, textAlign: "center", marginTop: 24 }}>
-                <div style={{ fontSize: "1.15rem", fontWeight: 900, letterSpacing: "0.02em" }}>{me.username}</div>
+                <div style={{ fontSize: "1.15rem", fontWeight: 900, letterSpacing: "0.02em" }}>
+                  {me.username}
+                </div>
 
                 <div className="form" style={{ marginTop: 0 }}>
                   <button
@@ -601,7 +636,12 @@ export default function Profile() {
 
                 {locked ? (
                   <>
-                    <DigitBox value={String(myEntry?.guess || "")} onChange={() => {}} disabled digits={DIGITS} />
+                    <DigitBox
+                      value={String(myEntry?.guess || "")}
+                      onChange={() => {}}
+                      disabled
+                      digits={DIGITS}
+                    />
 
                     <div style={{ display: "grid", gap: 8, marginTop: 10, textAlign: "left" }}>
                       <div style={{ display: "flex", justifyContent: "space-between" }}>
@@ -649,8 +689,8 @@ export default function Profile() {
         }
       >
         <div className="miniMuted" style={{ marginBottom: 10 }}>
-          You are about to proceed to payment for <strong>{guess.padStart(DIGITS, "0")}</strong>. Your entry is recorded{" "}
-          <strong>only after payment is confirmed</strong>.
+          You are about to proceed to payment for <strong>{guess.padStart(DIGITS, "0")}</strong>. Your entry is
+          recorded <strong>only after payment is confirmed</strong>.
         </div>
 
         <div className="miniMuted" style={{ marginBottom: 8 }}>

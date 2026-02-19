@@ -48,25 +48,36 @@ function floorToMinute(ms) {
 
 /* =========================================================
    CUTOFF LOGIC
+   NOTE: Make weekday matching resilient to config casing/format.
 ========================================================= */
 
+function normWeekdayShort(x) {
+  // Accept "Sat", "SAT", "Saturday", " saturday ", etc -> "sat"
+  const s = String(x || "").trim().toLowerCase();
+  if (!s) return "";
+  return s.slice(0, 3);
+}
+
+function isCutoffMinute(parts) {
+  return (
+    normWeekdayShort(parts.weekday) === normWeekdayShort(CUTOFF_WEEKDAY_SHORT) &&
+    Number(parts.hour) === Number(CUTOFF_HOUR_24) &&
+    Number(parts.minute) === Number(CUTOFF_MINUTE)
+  );
+}
+
 export function nextChicagoCutoffAfter(startMs) {
+  // start searching from the *next* minute
   const start = floorToMinute(startMs) + 60000;
-  const maxSteps = 14 * 24 * 60 + 5;
+  const maxSteps = 14 * 24 * 60 + 5; // up to 2 weeks of minute scanning
 
   for (let i = 0; i < maxSteps; i++) {
     const ms = start + i * 60000;
     const p = chicagoParts(ms);
-
-    if (
-      p.weekday === CUTOFF_WEEKDAY_SHORT &&
-      Number(p.hour) === CUTOFF_HOUR_24 &&
-      Number(p.minute) === CUTOFF_MINUTE
-    ) {
-      return ms;
-    }
+    if (isCutoffMinute(p)) return ms;
   }
 
+  // Fallback: if config mismatch somehow, move ahead one week
   return startMs + 7 * 24 * 60 * 60 * 1000;
 }
 
@@ -77,14 +88,7 @@ export function mostRecentChicagoCutoffAtOrBefore(endMs) {
   for (let i = 0; i < maxSteps; i++) {
     const ms = end - i * 60000;
     const p = chicagoParts(ms);
-
-    if (
-      p.weekday === CUTOFF_WEEKDAY_SHORT &&
-      Number(p.hour) === CUTOFF_HOUR_24 &&
-      Number(p.minute) === CUTOFF_MINUTE
-    ) {
-      return ms;
-    }
+    if (isCutoffMinute(p)) return ms;
   }
 
   return endMs - 7 * 24 * 60 * 60 * 1000;

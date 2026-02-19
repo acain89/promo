@@ -2,12 +2,7 @@
 import { Router } from "express";
 
 import { db } from "../lib/firestore.js";
-import {
-  ensureActiveContestNow,
-  mostRecentChicagoCutoffAtOrBefore,
-  contestIdFromCutoffMs,
-  mmddyyyyFromCutoffMs,
-} from "../lib/time.js";
+import { ensureActiveContestNow, mmddyyyyFromCutoffMs } from "../lib/time.js";
 import { nowMs } from "../lib/utils.js";
 import requireUser from "../middleware/auth.js";
 import { STRIPE_SECRET_KEY, NODE_ENV } from "../lib/config.js";
@@ -86,8 +81,13 @@ r.get("/api/contest", async (req, res) => {
 
     // Landing headline text (lets Admin change copy without a frontend deploy)
     const prizeHeadline =
-      String(contest.prizeHeadline || contest.headline || "").trim() ||
-      "$100 guaranteed + bonus";
+      String(contest.prizeHeadline || contest.headline || "").trim() || "$100 guaranteed + bonus";
+
+    // ✅ Authoritative weekly anchor
+    const endsOnMs = contest.cutoffAt ?? null;
+
+    // ✅ Never trust stored contest.endsOn string (it can be stale). Always compute.
+    const endsOnText = endsOnMs ? mmddyyyyFromCutoffMs(endsOnMs) : null;
 
     return res.json({
       ok: true,
@@ -98,7 +98,9 @@ r.get("/api/contest", async (req, res) => {
       id: contest.id || null,
       mode: "DAILY4",
       cutoffAt: contest.cutoffAt ?? null,
-      endsOn: contest.endsOn ?? null,
+      endsOnMs,
+      endsOn: endsOnText,
+
       resolved: !!contest.resolved,
       resolvedAt: contest.resolvedAt ?? null,
 
@@ -200,7 +202,11 @@ r.get("/api/amoe/winners", async (req, res) => {
   try {
     setNoCache(res);
     const HISTORY_LIMIT = 52;
-    const snap = await db().collection("amoeWinners").orderBy("resolvedAt", "desc").limit(HISTORY_LIMIT).get();
+    const snap = await db()
+      .collection("amoeWinners")
+      .orderBy("resolvedAt", "desc")
+      .limit(HISTORY_LIMIT)
+      .get();
     return res.json(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
   } catch (e) {
     return res.status(500).json({ error: e.message || "Failed to fetch AMOE winners." });
@@ -208,30 +214,42 @@ r.get("/api/amoe/winners", async (req, res) => {
 });
 
 /* =========================================================
-   PUBLIC — REVEAL STATE (MOST RECENT PAID CONTEST + AMOE)
+   PUBLIC — REVEAL STATE (ACTIVE PAID CONTEST + AMOE)
+   ✅ Use ensureActiveContestNow() so "Week ending" rolls weekly correctly
+   ✅ Never trust stored contest.endsOn string; always compute from cutoff timestamp
 ========================================================= */
 
 r.get("/api/reveal-state", async (req, res) => {
   try {
     setNoCache(res);
 
-    const lastCutoff = mostRecentChicagoCutoffAtOrBefore(nowMs());
-    const paidId = contestIdFromCutoffMs(lastCutoff);
+    // ✅ ACTIVE contest (upcoming Saturday), not "most recent cutoff in the past"
+    const active = await ensureActiveContestNow();
+    const paidId = active?.id || null;
+    const activeCutoffAt = active?.cutoffAt ?? null;
 
-    const paidSnap = await db().collection("contests").doc(paidId).get();
-    const paid = paidSnap.exists ? paidSnap.data() : null;
+    // Try to read the contest doc (should exist because ensureActiveContestNow creates/ensures it)
+    let paid = null;
+    if (paidId) {
+      const paidSnap = await db().collection("contests").doc(paidId).get();
+      paid = paidSnap.exists ? paidSnap.data() : null;
+    }
 
     // IMPORTANT: pull winner for THIS contest (not just latest overall)
-    const paidWinnerSnap = await db()
-      .collection("winners")
-      .where("contestId", "==", paidId)
-      .orderBy("resolvedAt", "desc")
-      .limit(1)
-      .get();
+    const paidWinnerSnap =
+      paidId
+        ? await db()
+            .collection("winners")
+            .where("contestId", "==", paidId)
+            .orderBy("resolvedAt", "desc")
+            .limit(1)
+            .get()
+        : null;
 
-    const paidWinner = paidWinnerSnap.empty
-      ? null
-      : { id: paidWinnerSnap.docs[0].id, ...paidWinnerSnap.docs[0].data() };
+    const paidWinner =
+      !paidWinnerSnap || paidWinnerSnap.empty
+        ? null
+        : { id: paidWinnerSnap.docs[0].id, ...paidWinnerSnap.docs[0].data() };
 
     const amoeStateSnap = await db().collection("amoe").doc("state").get();
     const amoeState = amoeStateSnap.exists ? amoeStateSnap.data() : null;
@@ -245,6 +263,11 @@ r.get("/api/reveal-state", async (req, res) => {
     const paidBonus = Number(paid?.bonusPrizeCents || 0);
     const paidFinal = Number(paid?.finalPrizeCents || 0) || paidGuaranteed + paidBonus;
 
+    const endsOnMs = paid?.cutoffAt ?? activeCutoffAt ?? null;
+
+    // ✅ Always compute week-ending from cutoff timestamp (no stale strings)
+    const endsOnText = endsOnMs ? mmddyyyyFromCutoffMs(endsOnMs) : null;
+
     return res.json({
       ok: true,
       serverNow: nowMs(),
@@ -254,8 +277,10 @@ r.get("/api/reveal-state", async (req, res) => {
         ? {
             id: paid.id || paidId,
             mode: "DAILY4",
-            cutoffAt: paid.cutoffAt ?? null,
-            endsOn: paid.endsOn ?? null,
+            cutoffAt: paid.cutoffAt ?? activeCutoffAt ?? null,
+            endsOnMs,
+            endsOn: endsOnText,
+
             resolved: !!paid.resolved,
             resolvedAt: paid.resolvedAt ?? null,
             targetNumber: paid.targetNumber ?? null,
@@ -270,8 +295,10 @@ r.get("/api/reveal-state", async (req, res) => {
         : {
             id: paidId,
             mode: "DAILY4",
-            cutoffAt: lastCutoff,
-            endsOn: mmddyyyyFromCutoffMs(lastCutoff),
+            cutoffAt: activeCutoffAt,
+            endsOnMs,
+            endsOn: endsOnText,
+
             resolved: false,
             resolvedAt: null,
             targetNumber: null,
