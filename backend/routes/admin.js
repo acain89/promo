@@ -165,17 +165,39 @@ async function deleteCollectionInBatches(colRef, batchSize = 400) {
 
 /* =========================================================
    STATS — LIFETIME "TOTAL PAID OUT" (MANUAL)
+   ✅ Source of truth for Landing: config/public.totalPaidOutCents
+   ✅ Keep legacy mirror: stats/global.totalPaidCents
 ========================================================= */
 
 const TOTAL_PAID_CAP_CENTS = 10_000_000_00; // $10,000,000.00
 
+const PUBLIC_CFG_REF = () => db().collection("config").doc("public");
+const GLOBAL_STATS_REF = () => db().collection("stats").doc("global");
+
+function safeCents(v) {
+  const n = Number(v || 0);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.floor(n);
+}
+
 async function getTotalPaidCents() {
   try {
-    const snap = await db().collection("stats").doc("global").get();
+    // ✅ Prefer config/public.totalPaidOutCents (Landing source of truth)
+    const pubSnap = await PUBLIC_CFG_REF().get();
+    if (pubSnap.exists) {
+      const d = pubSnap.data() || {};
+      const v = safeCents(d.totalPaidOutCents);
+      if (v >= 0) return v;
+    }
+  } catch {}
+
+  // Fallback to legacy stats/global.totalPaidCents
+  try {
+    const snap = await GLOBAL_STATS_REF().get();
     if (!snap.exists) return 0;
     const d = snap.data() || {};
-    const v = Number(d.totalPaidCents || 0);
-    return Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0;
+    const v = safeCents(d.totalPaidCents);
+    return v;
   } catch {
     return 0;
   }
@@ -186,13 +208,24 @@ async function addToTotalPaidCents(addCents) {
   if (inc == null) throw new Error("Invalid addCents.");
   if (!inc) return await getTotalPaidCents();
 
-  const ref = db().collection("stats").doc("global");
+  const pubRef = PUBLIC_CFG_REF();
+  const statsRef = GLOBAL_STATS_REF();
+
   await db().runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
-    const cur = snap.exists ? Number((snap.data() || {}).totalPaidCents || 0) : 0;
-    const base = Number.isFinite(cur) && cur >= 0 ? Math.floor(cur) : 0;
+    const pubSnap = await tx.get(pubRef);
+    const statsSnap = await tx.get(statsRef);
+
+    const pubCur = pubSnap.exists ? safeCents((pubSnap.data() || {}).totalPaidOutCents) : 0;
+    const statsCur = statsSnap.exists ? safeCents((statsSnap.data() || {}).totalPaidCents) : 0;
+
+    // ✅ Make config/public the canonical base if present; otherwise use legacy
+    const base = pubSnap.exists ? pubCur : statsCur;
+
     const next = Math.min(TOTAL_PAID_CAP_CENTS, base + inc);
-    tx.set(ref, { totalPaidCents: next, updatedAt: nowMs() }, { merge: true });
+
+    // ✅ Update BOTH (so Admin + Landing stay synced, and old code still works)
+    tx.set(pubRef, { totalPaidOutCents: next, updatedAt: nowMs() }, { merge: true });
+    tx.set(statsRef, { totalPaidCents: next, updatedAt: nowMs() }, { merge: true });
   });
 
   return await getTotalPaidCents();
@@ -202,8 +235,13 @@ async function setTotalPaidCentsAbsolute(totalCents) {
   const v = clampInt(totalCents, 0, TOTAL_PAID_CAP_CENTS);
   if (v == null) throw new Error("Invalid totalPaidCents.");
 
-  const ref = db().collection("stats").doc("global");
-  await ref.set({ totalPaidCents: v, updatedAt: nowMs() }, { merge: true });
+  const pubRef = PUBLIC_CFG_REF();
+  const statsRef = GLOBAL_STATS_REF();
+
+  const batch = db().batch();
+  batch.set(pubRef, { totalPaidOutCents: v, updatedAt: nowMs() }, { merge: true });
+  batch.set(statsRef, { totalPaidCents: v, updatedAt: nowMs() }, { merge: true });
+  await batch.commit();
 
   return v;
 }
@@ -490,7 +528,9 @@ r.post(
 
       const { state: amoeState } = await getOrInitAmoeState();
 
+      // ✅ This now matches Landing source-of-truth (config/public.totalPaidOutCents)
       const totalPaidCents = await getTotalPaidCents();
+
       const prizeCfg = await getPrizeConfig();
 
       const activeGuaranteed = Number(active.guaranteedPrizeCents || prizeCfg.weeklyGuaranteedPrizeCents || 0);
@@ -810,11 +850,6 @@ r.post(
 
 /* =========================================================
    ADMIN — RESET (WIPE PAID + AMOE ENTRIES)
-   - Deletes ALL entries in the contest pool (paid + AMOE mirror)
-   - Deletes ALL AMOE entries in the CURRENT AMOE cycle
-   - Resets contest fields (targets/projection/resolved/entryCount)
-   - Increments AMOE cycleId (so next is Cycle 02, 03, ...)
-   NOTE: Export first if you want to keep local copies.
 ========================================================= */
 
 r.post(
@@ -826,7 +861,7 @@ r.post(
       const { contestId } = req.body || {};
       const id = pickContestIdOrLast(contestId);
 
-      // Make sure contest exists (and also gives you a consistent "active" contest when contestId omitted)
+      // Make sure contest exists
       const contestRef = db().collection("contests").doc(id);
       const contestSnap = await contestRef.get();
       if (!contestSnap.exists) return res.status(400).json({ ok: false, error: "No such contest." });
@@ -901,7 +936,6 @@ r.post(
 
 /* =========================================================
    ADMIN — PAID PREVIEW + RESOLVE (LEGACY)
-   (Kept for now; UI will move to /targets/submit)
 ========================================================= */
 
 async function computePaidWinner({ contestId, targetNumber }) {
@@ -1054,8 +1088,6 @@ r.post(
 
 /* =========================================================
    ADMIN — AMOE CONTROLS
-   - Update: AMOE guess is 0000–9999
-   - Also writes AMOE entries into the ACTIVE contest entry pool
 ========================================================= */
 
 function cleanEmail(s) {
@@ -1108,7 +1140,7 @@ r.post(
         return res.status(400).json({ error: "An AMOE entry already exists for this email in the current cycle." });
       }
 
-      // 1) Store in legacy AMOE storage (kept for export/reset cycle continuity)
+      // 1) Store in legacy AMOE storage
       const entryDoc = await db()
         .collection("amoeEntries")
         .doc(String(cycleId))
@@ -1124,7 +1156,7 @@ r.post(
           createdAt: nowMs(),
         });
 
-      // 2) ALSO store into the active contest entry pool so unified targets work
+      // 2) ALSO store into the active contest entry pool
       const active = await ensureActiveContestNow();
       if (active?.id) {
         await db()
@@ -1132,7 +1164,6 @@ r.post(
           .doc(active.id)
           .collection("items")
           .add({
-            // minimal fields used by resolver + winners UI
             paid: false,
             status: "AMOE",
             source: "AMOE",
@@ -1143,7 +1174,6 @@ r.post(
             email: em,
             address: addr,
 
-            // for placards:
             username: nm,
             guess: normalizeNumber(n, 4),
 
