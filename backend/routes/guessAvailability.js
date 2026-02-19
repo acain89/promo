@@ -14,43 +14,29 @@ function setNoCache(res) {
   res.setHeader("Expires", "0");
 }
 
-/**
- * GET /api/guess-availability?guess=0000
- *
- * Returns:
- *  { ok: true, contestId, guess, available: boolean, claimedBy: "PAID"|"AMOE"|null }
- *
- * Claim definition (MATCHES checkoutConfirm):
- * - A number is "claimed" ONLY if there exists an entry belonging to SOMEONE ELSE
- *   in the active contest with:
- *     guess == normalizedGuess AND countedInContest === true
- *   (covers PAID-confirmed + AMOE-inserted entries)
- *
- * Notes:
- * - Protected (requireUser) so random traffic can’t scrape availability.
- * - UI hint only; true enforcement still happens in checkoutConfirm transaction.
- */
 r.get("/api/guess-availability", requireUser, async (req, res) => {
   try {
     setNoCache(res);
 
     const userId = String(req.user?.id || "").trim();
-    if (!userId) return res.status(401).json({ ok: false, error: "Unauthorized." });
+    if (!userId) {
+      return res.status(401).json({ ok: false, error: "Unauthorized." });
+    }
 
     const raw = String(req.query.guess || "").trim();
-    const d = onlyDigits(raw);
-    if (d.length !== 4) {
+    const digits = onlyDigits(raw);
+
+    if (digits.length !== 4) {
       return res.status(400).json({ ok: false, error: "guess must be 4 digits." });
     }
 
-    const guessNorm = normalizeNumber(Number(d), 4);
+    const guessNorm = normalizeNumber(Number(digits), 4);
 
     const contest = await ensureActiveContestNow();
     if (!contest?.id) {
       return res.status(400).json({ ok: false, error: "Active contest not available." });
     }
 
-    // If contest is resolved, availability is effectively closed.
     if (contest.resolved) {
       return res.json({
         ok: true,
@@ -62,14 +48,14 @@ r.get("/api/guess-availability", requireUser, async (req, res) => {
       });
     }
 
-    const col = db().collection("entries").doc(String(contest.id)).collection("items");
+    const col = db()
+      .collection("entries")
+      .doc(String(contest.id))
+      .collection("items");
 
-    // Pull a couple matches so we can ignore "self" and still detect "other"
-    const snap = await col
-      .where("guess", "==", guessNorm)
-      .where("countedInContest", "==", true)
-      .limit(5)
-      .get();
+    // 🔥 IMPORTANT: remove countedInContest filter from query
+    // because missing fields break logic
+    const snap = await col.where("guess", "==", guessNorm).limit(20).get();
 
     if (snap.empty) {
       return res.json({
@@ -81,13 +67,14 @@ r.get("/api/guess-availability", requireUser, async (req, res) => {
       });
     }
 
-    // MATCH checkoutConfirm: claimed only if someone else has it
-const otherDoc = snap.docs.find(
-  (doc) => String(doc.data()?.userId || "") !== userId
-);
+    // Only block if SOMEONE ELSE has countedInContest === true
+    const otherDoc = snap.docs.find((doc) => {
+      if (doc.id === userId) return false;
+      const d = doc.data() || {};
+      return d.countedInContest === true;
+    });
 
     if (!otherDoc) {
-      // Only claimant is the current user (or duplicates are all self) -> available
       return res.json({
         ok: true,
         contestId: contest.id,
@@ -98,7 +85,9 @@ const otherDoc = snap.docs.find(
     }
 
     const e = otherDoc.data() || {};
-    const src = String(e.source || (e.isAmoe ? "AMOE" : e.paid ? "PAID" : "") || "").toUpperCase();
+    const src = String(
+      e.source || (e.isAmoe ? "AMOE" : e.paid ? "PAID" : "")
+    ).toUpperCase();
 
     return res.json({
       ok: true,
@@ -107,8 +96,12 @@ const otherDoc = snap.docs.find(
       available: false,
       claimedBy: src === "AMOE" ? "AMOE" : "PAID",
     });
+
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e?.message || "Failed to check availability." });
+    return res.status(500).json({
+      ok: false,
+      error: e?.message || "Failed to check availability.",
+    });
   }
 });
 
