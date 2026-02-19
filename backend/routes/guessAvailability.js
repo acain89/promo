@@ -42,7 +42,13 @@ r.get("/api/guess-availability", requireUser, async (req, res) => {
     }
 
     // If ANY OTHER user has this guess, it's taken
-    const taken = snap.docs.some(doc => doc.id !== userId);
+const taken = snap.docs.some((doc) => {
+  const d = doc.data() || {};
+  const owner =
+    String(d.userId || d.uid || d.ownerId || doc.id || "").trim();
+
+  return owner && owner !== userId;
+});
 
     return res.json({
       ok: true,
