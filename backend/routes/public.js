@@ -62,6 +62,25 @@ function isPaidEntryEligible(e) {
 }
 
 /* =========================================================
+   PUBLIC CONFIG (config/public)
+========================================================= */
+async function getPublicConfig() {
+  try {
+    const snap = await db().collection("config").doc("public").get();
+    if (!snap.exists) return {};
+    return snap.data() || {};
+  } catch {
+    return {};
+  }
+}
+
+function toSafeInt(n, fallback = 0) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return fallback;
+  return Math.max(0, Math.floor(v));
+}
+
+/* =========================================================
    PUBLIC — CONTEST STATE (ACTIVE CONTEST) — DAILY4 ONLY
 ========================================================= */
 
@@ -89,6 +108,10 @@ r.get("/api/contest", async (req, res) => {
     // ✅ Never trust stored contest.endsOn string (it can be stale). Always compute.
     const endsOnText = endsOnMs ? mmddyyyyFromCutoffMs(endsOnMs) : null;
 
+    // ✅ Lifetime paid-out (manual) from Firestore config/public
+    const cfg = await getPublicConfig();
+    const totalPaidOutCents = toSafeInt(cfg?.totalPaidOutCents, 0);
+
     return res.json({
       ok: true,
       serverNow: nowMs(),
@@ -112,6 +135,9 @@ r.get("/api/contest", async (req, res) => {
       finalPrizeCents,
 
       prizeHeadline,
+
+      // ✅ NEW FIELD
+      totalPaidOutCents,
 
       activatedAt: contest.activatedAt ?? null,
     });
@@ -268,10 +294,17 @@ r.get("/api/reveal-state", async (req, res) => {
     // ✅ Always compute week-ending from cutoff timestamp (no stale strings)
     const endsOnText = endsOnMs ? mmddyyyyFromCutoffMs(endsOnMs) : null;
 
+    // ✅ Lifetime paid-out (manual) from Firestore config/public
+    const cfg = await getPublicConfig();
+    const totalPaidOutCents = toSafeInt(cfg?.totalPaidOutCents, 0);
+
     return res.json({
       ok: true,
       serverNow: nowMs(),
       paymentsEnabled: paymentsEnabled(),
+
+      // ✅ NEW FIELD (useful for the frontend to show globally)
+      totalPaidOutCents,
 
       paid: paid
         ? {

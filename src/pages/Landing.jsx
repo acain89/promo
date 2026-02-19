@@ -21,6 +21,12 @@ function formatDDHHMMSS(ms) {
   return `${pad2(days)}:${pad2(hours)}:${pad2(mins)}:${pad2(secs)}`;
 }
 
+function dollarsFromCents(cents) {
+  const n = Number(cents || 0);
+  const v = Number.isFinite(n) ? n : 0;
+  return (v / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
+}
+
 export default function Landing() {
   const nav = useNavigate();
 
@@ -150,6 +156,55 @@ export default function Landing() {
     textAlign: "center",
   };
 
+  // Live stats (safe fallbacks)
+  const livePlayers =
+    Number.isFinite(Number(contest?.entryCount)) ? Number(contest?.entryCount) :
+    Number.isFinite(Number(contest?.playerCount)) ? Number(contest?.playerCount) :
+    0;
+
+  function toCentsMaybe(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return null;
+    // Heuristic:
+    // - if it's already big (>= 10000), assume it's cents
+    // - if it's small (< 10000), assume it's dollars and convert
+    // (so 2555 -> $2,555 becomes 255500 cents)
+    if (n >= 10000) return Math.round(n);
+    return Math.round(n * 100);
+  }
+
+  // ✅ ADD THIS LINE: pull the lifetime paid-out cents from /api/contest
+  const totalPaidOutCents = toCentsMaybe(contest?.totalPaidOutCents) ?? 0;
+
+  const statBoxStyle = {
+    flex: 1,
+    borderRadius: 12,
+    padding: "10px 10px",
+    background: "rgba(255,255,255,0.04)",
+    border: "1px solid rgba(255,255,255,0.10)",
+    boxShadow: "0 0 0 1px rgba(0,0,0,0.25) inset",
+    minHeight: 46, // roughly button height, but looks tighter
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: "center",
+    gap: 2,
+  };
+
+  const statLabelStyle = {
+    fontSize: 11,
+    letterSpacing: "0.12em",
+    opacity: 0.8,
+    textTransform: "uppercase",
+    lineHeight: 1.1,
+  };
+
+  const statValueStyle = {
+    fontSize: 18,
+    fontWeight: 900,
+    letterSpacing: "0.03em",
+    lineHeight: 1.1,
+  };
+
   return (
     <PanelShell
       label=""
@@ -249,16 +304,27 @@ export default function Landing() {
             Time left to lock in your submission.
           </div>
 
-          {/* Buttons */}
+          {/* Buttons / Stats */}
           <div className="form" style={{ marginTop: 4 }}>
-            <button className="primary" onClick={onEnter} disabled={enterDisabled}>
+            {/* Where Enter USED to be: 2 live stat blocks, same size */}
+            <div style={{ display: "flex", gap: 10, width: "100%" }}>
+              <div style={statBoxStyle} aria-label="Live player count">
+                <div style={statLabelStyle}>Live Players</div>
+                <div style={statValueStyle}>{loading ? "—" : String(livePlayers)}</div>
+              </div>
+
+              <div style={statBoxStyle} aria-label="Total paid out">
+                <div style={statLabelStyle}>Total Paid Out</div>
+                <div style={statValueStyle}>{loading ? "—" : dollarsFromCents(totalPaidOutCents)}</div>
+              </div>
+            </div>
+
+            {/* Move Enter DOWN */}
+            <button className="primary" onClick={onEnter} disabled={enterDisabled} style={{ marginTop: 10 }}>
               Enter
             </button>
 
-            <button className="secondary" onClick={() => nav("/winners")} disabled={loading}>
-              Winners
-            </button>
-
+            {/* Winners button removed */}
             <button className="secondary" onClick={openHow} disabled={loading}>
               How To Play
             </button>
@@ -320,12 +386,11 @@ export default function Landing() {
 
             <div style={{ marginTop: 12, opacity: 0.92, lineHeight: 1.4, fontSize: 16 }}>
               <ol style={{ margin: 0, paddingLeft: 20 }}>
-                <li>Lock in a 4-digit number.</li>
-                <li>Each number can only be played once.</li>
-                <li>Exact match wins instantly.</li>
-                <li>If no exact match, closest to target number wins.</li>
-                <li>Target number is any of the four Daily 4 drawings on Saturday.</li>
-                <li>Guaranteed winner for guaranteed prize amount, every week.</li>
+                <li>Choose and lock in a 4-digit number (0000–9999).</li>
+                <li>Each number can only be claimed once per week.</li>
+                <li>Exact match on any Saturday draw? You win instantly.</li>
+                <li>If no exact match occurs, the closest number wins.</li>
+                <li>One winner. One prize. Every week.</li>
               </ol>
 
               <div style={{ display: "flex", justifyContent: "center", marginTop: 14 }}>

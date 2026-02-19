@@ -137,10 +137,6 @@ app.use(requireUser, checkoutRoutes);
 app.use(requireUser, checkoutConfirmRoutes);
 app.use(requireUser, profileBootstrapRoutes);
 
-
-// ✅ New: Protected bootstrap (user session required)
-app.use(requireUser, profileBootstrapRoutes);
-
 /* =========================================================
    FALLBACKS
 ========================================================= */
