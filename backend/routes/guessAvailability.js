@@ -82,7 +82,9 @@ r.get("/api/guess-availability", requireUser, async (req, res) => {
     }
 
     // MATCH checkoutConfirm: claimed only if someone else has it
-    const otherDoc = snap.docs.find((doc) => doc.id !== userId);
+const otherDoc = snap.docs.find(
+  (doc) => String(doc.data()?.userId || "") !== userId
+);
 
     if (!otherDoc) {
       // Only claimant is the current user (or duplicates are all self) -> available
