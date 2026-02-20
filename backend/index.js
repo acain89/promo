@@ -59,20 +59,25 @@ const NO_CACHE_PATHS = new Set([
 ]);
 
 app.use((req, res, next) => {
+  // Disable caching for sensitive GET endpoints
   if (req.method === "GET" && NO_CACHE_PATHS.has(req.path)) {
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
     res.setHeader("Pragma", "no-cache");
     res.setHeader("Expires", "0");
   }
 
-  // helps caches handle CORS responses correctly
+  // Ensure Vary includes Origin (without duplicates)
   const prev = res.getHeader("Vary");
-  if (!prev) res.setHeader("Vary", "Origin");
-  else if (!String(prev).includes("Origin")) res.setHeader("Vary", `${prev}, Origin`);
+  const vary = Array.isArray(prev) ? prev.join(", ") : String(prev || "");
+
+  if (!vary) {
+    res.setHeader("Vary", "Origin");
+  } else if (!vary.split(",").map(v => v.trim()).includes("Origin")) {
+    res.setHeader("Vary", `${vary}, Origin`);
+  }
 
   next();
 });
-
 /* =========================================================
    CORS (cookies + Authorization for Admin)
 ========================================================= */

@@ -1,1365 +1,1511 @@
-// src/pages/Admin.jsx
-import React, { useEffect, useMemo, useState } from "react";
-import { apiPost, setAdminToken } from "../lib/api.js";
+// backend/routes/admin.js
+import { Router } from "express";
 
-function onlyDigits(s) {
-  return String(s ?? "").replace(/[^\d]/g, "");
+import requireAdmin, { signAdminToken } from "../middleware/admin.js";
+import rateLimit from "../middleware/rateLimit.js";
+
+import { db } from "../lib/firestore.js";
+import { auditLog } from "../lib/audit.js";
+
+import {
+  ADMIN_CODE,
+  ADMIN_TOKEN_SECRET,
+  TOKEN_TTL_SECONDS,
+  HISTORY_LIMIT,
+  AMOE_TARGET_COUNT,
+  AMOE_PRIZE_CENTS,
+} from "../lib/config.js";
+
+import { onlyDigits, normalizeNumber, absDiff, nowMs } from "../lib/utils.js";
+
+import {
+  ensureActiveContestNow,
+  mostRecentChicagoCutoffAtOrBefore,
+  contestIdFromCutoffMs,
+  getOrInitAmoeState,
+} from "../lib/time.js";
+
+const r = Router();
+
+/* =========================================================
+   HELPERS
+========================================================= */
+
+function clampInt(n, lo, hi) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return null;
+  const i = Math.floor(v);
+  if (i < lo) return lo;
+  if (i > hi) return hi;
+  return i;
 }
 
-function formatTS(ms) {
-  if (!ms) return "—";
-  try {
-    const d = new Date(ms);
-    if (Number.isNaN(d.getTime())) return "—";
-    return d.toLocaleString();
-  } catch {
-    return "—";
+/**
+ * Parse a money-ish input as DOLLARS -> CENTS.
+ * Accepts:
+ * - 100      => $100.00 -> 10000
+ * - 100.50   => $100.50 -> 10050
+ * - "$100.50" => 10050
+ *
+ * NOTE: This function intentionally treats integers as dollars (not cents),
+ * since these are admin-facing inputs.
+ */
+function parseMoneyToCents(input) {
+  const raw = String(input ?? "").trim();
+  const cleaned = raw.replace(/[^0-9.]/g, "");
+  if (!cleaned) return null;
+
+  // disallow multiple decimals
+  if ((cleaned.match(/\./g) || []).length > 1) return null;
+
+  const f = Number(cleaned);
+  if (!Number.isFinite(f)) return null;
+  if (f < 0) return null;
+
+  return Math.round(f * 100);
+}
+
+/**
+ * Entries eligible for counting.
+ * Source of truth: countedInContest === true.
+ * (This is what prevents "paid but not counted" or any legacy junk from claiming numbers.)
+ */
+function isPaidEntryEligible(e) {
+  if (!e) return false;
+  if (!e.paid) return false;
+
+  const s = String(e.status || "").toUpperCase();
+  if (s === "REFUNDED" || s === "DISPUTED" || s === "EXPIRED") return false;
+
+  if (typeof e.countedInContest === "boolean") {
+    return e.countedInContest === true;
+  }
+
+  // Back-compat fallback (should be rare once everything writes countedInContest)
+  if (s === "QUEUED") return false;
+  return true;
+}
+
+/**
+ * Unified eligibility:
+ * - paid entries that qualify (paid + countedInContest true)
+ * - AMOE entries mirrored into the contest pool MUST ALSO be countedInContest true
+ */
+function isUnifiedEligible(e) {
+  if (!e) return false;
+
+  if (isPaidEntryEligible(e)) return true;
+
+  const isAmoe =
+    String(e.source || "").toUpperCase() === "AMOE" ||
+    e.isAmoe === true ||
+    String(e.status || "").toUpperCase() === "AMOE";
+
+  if (isAmoe) return e.countedInContest === true;
+
+  return false;
+}
+
+async function getContestByIdOrLast(contestIdMaybe) {
+  let id = String(contestIdMaybe || "").trim();
+  if (!id) {
+    const lastCutoff = mostRecentChicagoCutoffAtOrBefore(nowMs());
+    id = contestIdFromCutoffMs(lastCutoff);
+  }
+  const ref = db().collection("contests").doc(id);
+  const snap = await ref.get();
+  if (!snap.exists) return { ok: false, error: "No such contest.", contestId: id };
+  return { ok: true, contestId: id, contest: { id: snap.id, ...(snap.data() || {}) } };
+}
+
+function pickContestIdOrLast(contestIdMaybe) {
+  const id0 = String(contestIdMaybe || "").trim();
+  if (id0) return id0;
+  return contestIdFromCutoffMs(mostRecentChicagoCutoffAtOrBefore(nowMs()));
+}
+
+function parse4DigitNumber(raw) {
+  const d = onlyDigits(raw);
+  if (d.length !== 4) return null; // ✅ enforce EXACT 4 digits (0000–9999)
+  const n = Number(d);
+  if (!Number.isFinite(n)) return null;
+  if (n < 0 || n > 9999) return null;
+  return n;
+}
+
+function slotToLabel(slot) {
+  switch (Number(slot)) {
+    case 1:
+      return "Morning";
+    case 2:
+      return "Day";
+    case 3:
+      return "Evening";
+    case 4:
+      return "Night";
+    default:
+      return "—";
   }
 }
 
-function dollarsFromCents(cents) {
-  const n = Number(cents || 0);
-  const v = Number.isFinite(n) ? n : 0;
-  return (v / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
+/**
+ * Firestore helper: delete an entire collection in safe batches.
+ * Returns number of deleted docs.
+ */
+async function deleteCollectionInBatches(colRef, batchSize = 400) {
+  let deleted = 0;
+
+  while (true) {
+    const snap = await colRef.limit(batchSize).get();
+    if (snap.empty) break;
+
+    const batch = db().batch();
+    snap.docs.forEach((d) => batch.delete(d.ref));
+    await batch.commit();
+
+    deleted += snap.size;
+
+    if (snap.size < batchSize) break;
+  }
+
+  return deleted;
 }
 
-function downloadJson(filename, obj) {
+/**
+ * Firestore helper: delete a QUERY result set in safe batches.
+ * Returns number of deleted docs.
+ */
+async function deleteQueryInBatches(query, batchSize = 400) {
+  let deleted = 0;
+
+  while (true) {
+    const snap = await query.limit(batchSize).get();
+    if (snap.empty) break;
+
+    const batch = db().batch();
+    snap.docs.forEach((d) => batch.delete(d.ref));
+    await batch.commit();
+
+    deleted += snap.size;
+
+    if (snap.size < batchSize) break;
+  }
+
+  return deleted;
+}
+
+/**
+ * Trim a collection by resolvedAt desc, keep newest HISTORY_LIMIT.
+ * Uses a bounded query so we don’t scan the whole collection.
+ */
+async function trimByResolvedAt(collectionName, keep = HISTORY_LIMIT) {
+  const cap = Math.max(0, Number(keep || 0));
+  // Fetch only enough to know what to delete (keep + up to 300 extra)
+  const snap = await db()
+    .collection(collectionName)
+    .orderBy("resolvedAt", "desc")
+    .limit(cap + 300)
+    .get();
+
+  if (snap.empty) return 0;
+
+  const extra = snap.docs.slice(cap);
+  if (!extra.length) return 0;
+
+  const batch = db().batch();
+  extra.forEach((d) => batch.delete(d.ref));
+  await batch.commit();
+  return extra.length;
+}
+
+/* =========================================================
+   STATS — LIFETIME "TOTAL PAID OUT" (MANUAL)
+   ✅ Source of truth for Landing: config/public.totalPaidOutCents
+   ✅ Keep legacy mirror: stats/global.totalPaidCents
+========================================================= */
+
+const TOTAL_PAID_CAP_CENTS = 10_000_000_00; // $10,000,000.00
+
+const PUBLIC_CFG_REF = () => db().collection("config").doc("public");
+const GLOBAL_STATS_REF = () => db().collection("stats").doc("global");
+
+function safeCents(v) {
+  const n = Number(v || 0);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.floor(n);
+}
+
+async function getTotalPaidCents() {
   try {
-    const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    const pubSnap = await PUBLIC_CFG_REF().get();
+    if (pubSnap.exists) {
+      const d = pubSnap.data() || {};
+      const v = safeCents(d.totalPaidOutCents);
+      if (v >= 0) return v;
+    }
   } catch {}
+
+  try {
+    const snap = await GLOBAL_STATS_REF().get();
+    if (!snap.exists) return 0;
+    const d = snap.data() || {};
+    return safeCents(d.totalPaidCents);
+  } catch {
+    return 0;
+  }
 }
 
-// Best-effort extract of error details from thrown objects
-function errMsg(e, fallback = "Request failed.") {
-  const m =
-    e?.message ||
-    e?.error ||
-    e?.response?.data?.error ||
-    e?.response?.error ||
-    e?.data?.error ||
-    e?.toString?.();
-  return String(m || fallback);
+async function addToTotalPaidCents(addCents) {
+  const inc = clampInt(addCents, 0, TOTAL_PAID_CAP_CENTS);
+  if (inc == null) throw new Error("Invalid addCents.");
+  if (!inc) return await getTotalPaidCents();
+
+  const pubRef = PUBLIC_CFG_REF();
+  const statsRef = GLOBAL_STATS_REF();
+
+  await db().runTransaction(async (tx) => {
+    const pubSnap = await tx.get(pubRef);
+    const statsSnap = await tx.get(statsRef);
+
+    const pubCur = pubSnap.exists ? safeCents((pubSnap.data() || {}).totalPaidOutCents) : 0;
+    const statsCur = statsSnap.exists ? safeCents((statsSnap.data() || {}).totalPaidCents) : 0;
+
+    const base = pubSnap.exists ? pubCur : statsCur;
+    const next = Math.min(TOTAL_PAID_CAP_CENTS, base + inc);
+
+    tx.set(pubRef, { totalPaidOutCents: next, updatedAt: nowMs() }, { merge: true });
+    tx.set(statsRef, { totalPaidCents: next, updatedAt: nowMs() }, { merge: true });
+  });
+
+  return await getTotalPaidCents();
 }
 
-function LoginModal({ open, onClose, onSubmit, err, busy }) {
-  const [code, setCode] = useState("");
+async function setTotalPaidCentsAbsolute(totalCents) {
+  const v = clampInt(totalCents, 0, TOTAL_PAID_CAP_CENTS);
+  if (v == null) throw new Error("Invalid totalPaidCents.");
 
-  useEffect(() => {
-    if (!open) return;
-    setCode("");
-  }, [open]);
+  const pubRef = PUBLIC_CFG_REF();
+  const statsRef = GLOBAL_STATS_REF();
 
-  if (!open) return null;
+  const batch = db().batch();
+  batch.set(pubRef, { totalPaidOutCents: v, updatedAt: nowMs() }, { merge: true });
+  batch.set(statsRef, { totalPaidCents: v, updatedAt: nowMs() }, { merge: true });
+  await batch.commit();
 
-  const canSubmit = !!String(code || "").trim() && !busy;
+  return v;
+}
 
-  return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 9999,
-        display: "grid",
-        placeItems: "center",
-        padding: 18,
-        background: "rgba(0,0,0,0.72)",
-        backdropFilter: "blur(6px)",
-      }}
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !busy) onClose?.();
-      }}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Admin Login"
-    >
-      <div
-        style={{
-          width: "min(520px, 92vw)",
-          borderRadius: 16,
-          border: "1px solid rgba(255,255,255,0.12)",
-          background: "rgba(15,15,18,0.92)",
-          padding: 16,
-          boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
-        }}
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
-          <h3 style={{ margin: 0 }}>Admin Code</h3>
-          <button className="secondary" onClick={onClose} style={{ padding: "8px 10px" }} disabled={busy}>
-            Close
-          </button>
-        </div>
+/* =========================================================
+   ADMIN — PRIZE CONFIG (WEEKLY GUARANTEED + BONUS)
+========================================================= */
 
-        <p style={{ marginTop: 8, marginBottom: 12, opacity: 0.8, fontSize: 13 }}>
-          Enter the admin passcode to unlock controls.
-        </p>
+const PRIZE_MAX_CENTS = 1_000_000_00; // $1,000,000.00 cap safety
 
-        <input
-          className="field"
-          type="password"
-          autoFocus
-          value={code}
-          onChange={(e) => setCode(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && canSubmit) onSubmit?.(code);
-            if (e.key === "Escape" && !busy) onClose?.();
-          }}
-          placeholder="••••••"
-          style={{ width: "100%", maxWidth: "100%", padding: "12px 12px" }}
-          disabled={busy}
-        />
+async function getPrizeConfig() {
+  const ref = db().collection("config").doc("public");
+  const snap = await ref.get();
+  const d = snap.exists ? snap.data() || {} : {};
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
-          <button className="secondary" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
-          <button className="primary" onClick={() => onSubmit?.(code)} disabled={!canSubmit}>
-            {busy ? "Unlocking..." : "Unlock"}
-          </button>
-        </div>
+  const guaranteed = clampInt(d.weeklyGuaranteedPrizeCents, 0, PRIZE_MAX_CENTS);
+  const bonus = clampInt(d.weeklyBonusPrizeCents, 0, PRIZE_MAX_CENTS);
 
-        {err ? <div style={{ marginTop: 10, color: "#ffb2b2", fontSize: 13 }}>{err}</div> : null}
-      </div>
-    </div>
+  return {
+    weeklyGuaranteedPrizeCents: guaranteed != null ? guaranteed : 10000,
+    weeklyBonusPrizeCents: bonus != null ? bonus : 0,
+  };
+}
+
+async function setPrizeConfig({ weeklyGuaranteedPrizeCents, weeklyBonusPrizeCents }) {
+  const g = clampInt(parseMoneyToCents(weeklyGuaranteedPrizeCents), 0, PRIZE_MAX_CENTS);
+  const b = clampInt(parseMoneyToCents(weeklyBonusPrizeCents), 0, PRIZE_MAX_CENTS);
+
+  if (g == null) throw new Error("Invalid guaranteed prize.");
+  if (b == null) throw new Error("Invalid bonus prize.");
+
+  const ref = db().collection("config").doc("public");
+  await ref.set(
+    {
+      weeklyGuaranteedPrizeCents: g,
+      weeklyBonusPrizeCents: b,
+      updatedAt: nowMs(),
+    },
+    { merge: true }
   );
+
+  // Apply to active contest immediately (best-effort)
+  try {
+    const active = await ensureActiveContestNow();
+    if (active?.id) {
+      const contestRef = db().collection("contests").doc(active.id);
+      await contestRef.set(
+        {
+          guaranteedPrizeCents: g,
+          bonusPrizeCents: b,
+          finalPrizeCents: g + b,
+          prizeUpdatedAt: nowMs(),
+          mode: "DAILY4",
+        },
+        { merge: true }
+      );
+    }
+  } catch {}
+
+  return { weeklyGuaranteedPrizeCents: g, weeklyBonusPrizeCents: b };
 }
 
-function WinnerModal({ open, onClose, data }) {
-  if (!open) return null;
+/* =========================================================
+   ADMIN — LOGIN (CODE -> TOKEN)
+========================================================= */
 
-  const wr = data?.winnerRecord || null;
-  const pw = data?.projectedWinner || null;
-
-  const un = wr?.winnerUN || data?.best?.winnerUN || pw?.winnerUN || "—";
-  const guess = wr?.guess || data?.best?.guess || pw?.guess || "—";
-  const target = wr?.target || data?.target || pw?.target || "—";
-  const drawLabel = wr?.drawLabel || data?.drawLabel || pw?.drawLabel || "—";
-  const dft = wr?.diff ?? data?.best?.diff ?? pw?.diff ?? "—";
-
-  const prize = wr?.finalPrizeCents != null ? dollarsFromCents(wr.finalPrizeCents) : "—";
-  const playedAt = wr?.playedAt ?? data?.playedAt ?? pw?.playedAt ?? null;
-  const stamp = wr?.resolvedAt ?? data?.serverNow ?? Date.now();
-
-  return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 99999,
-        display: "grid",
-        placeItems: "center",
-        padding: 18,
-        background: "rgba(0,0,0,0.74)",
-        backdropFilter: "blur(6px)",
-      }}
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose?.();
-      }}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Winner"
-    >
-      <div
-        style={{
-          width: "min(560px, 94vw)",
-          borderRadius: 18,
-          border: "1px solid rgba(255,255,255,0.14)",
-          background: "rgba(15,15,18,0.94)",
-          padding: 16,
-          boxShadow: "0 14px 50px rgba(0,0,0,0.65)",
-          position: "relative",
-          overflow: "hidden",
-        }}
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        <div
-          aria-hidden="true"
-          style={{
-            position: "absolute",
-            inset: -40,
-            opacity: 0.18,
-            background:
-              "radial-gradient(circle at 20% 30%, rgba(255,255,255,0.9) 0 2px, transparent 3px) , " +
-              "radial-gradient(circle at 70% 20%, rgba(255,255,255,0.9) 0 2px, transparent 3px) , " +
-              "radial-gradient(circle at 40% 80%, rgba(255,255,255,0.9) 0 2px, transparent 3px) , " +
-              "radial-gradient(circle at 85% 75%, rgba(255,255,255,0.9) 0 2px, transparent 3px)",
-          }}
-        />
-
-        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
-          <div style={{ display: "grid", gap: 2 }}>
-            <div style={{ fontSize: 10, letterSpacing: "0.18em", textTransform: "uppercase", opacity: 0.75 }}>
-              Exact Match — Winner
-            </div>
-            <div style={{ fontSize: 22, fontWeight: 950 }}>{un}</div>
-          </div>
-
-          <button className="secondary" onClick={onClose} style={{ padding: "8px 10px" }}>
-            Close
-          </button>
-        </div>
-
-        <div
-          style={{
-            marginTop: 12,
-            borderRadius: 14,
-            border: "1px solid rgba(255,255,255,0.12)",
-            background: "rgba(255,255,255,0.03)",
-            padding: "12px 12px",
-          }}
-        >
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
-            <div style={{ fontSize: 12, letterSpacing: "0.16em", textTransform: "uppercase", opacity: 0.8 }}>
-              Winning Placard
-            </div>
-            <div style={{ fontSize: 16, fontWeight: 950 }}>{prize}</div>
-          </div>
-
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-              gap: 10,
-              marginTop: 10,
-            }}
-          >
-            <div
-              style={{
-                borderRadius: 12,
-                border: "1px solid rgba(255,255,255,0.10)",
-                background: "rgba(255,255,255,0.015)",
-                padding: "10px 10px",
-              }}
-            >
-              <div className="label">Entry</div>
-              <div className="value" style={{ letterSpacing: "0.14em", fontVariantNumeric: "tabular-nums" }}>
-                {guess}
-              </div>
-            </div>
-
-            <div
-              style={{
-                borderRadius: 12,
-                border: "1px solid rgba(255,255,255,0.10)",
-                background: "rgba(255,255,255,0.015)",
-                padding: "10px 10px",
-              }}
-            >
-              <div className="label">Target</div>
-              <div className="value" style={{ fontVariantNumeric: "tabular-nums" }}>
-                {drawLabel} · {target}
-              </div>
-            </div>
-
-            <div
-              style={{
-                borderRadius: 12,
-                border: "1px solid rgba(255,255,255,0.10)",
-                background: "rgba(255,255,255,0.015)",
-                padding: "10px 10px",
-              }}
-            >
-              <div className="label">DFT</div>
-              <div className="value">{String(dft)}</div>
-            </div>
-
-            <div
-              style={{
-                borderRadius: 12,
-                border: "1px solid rgba(255,255,255,0.10)",
-                background: "rgba(255,255,255,0.015)",
-                padding: "10px 10px",
-              }}
-            >
-              <div className="label">Timestamp</div>
-              <div className="value">
-                {playedAt ? formatTS(playedAt) : "—"} <span className="miniMuted">•</span> {formatTS(stamp)}
-              </div>
-            </div>
-          </div>
-
-          <div className="miniMuted" style={{ marginTop: 10, textAlign: "center" }}>
-            Winners page should update automatically. If it doesn’t, refresh once.
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-export default function Admin() {
-  const [unlocked, setUnlocked] = useState(false);
-  const [status, setStatus] = useState("");
-  const [err, setErr] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const [state, setState] = useState(null);
-
-  const [loginOpen, setLoginOpen] = useState(false);
-  const [loginBusy, setLoginBusy] = useState(false);
-
-  // AMOE
-  const [amoeName, setAmoeName] = useState("");
-  const [amoeEmail, setAmoeEmail] = useState("");
-  const [amoeAddress, setAmoeAddress] = useState("");
-  const [amoeGuessRaw, setAmoeGuessRaw] = useState("");
-
-  // Unified targets (1..4)
-  const [t1Raw, setT1Raw] = useState("");
-  const [t2Raw, setT2Raw] = useState("");
-  const [t3Raw, setT3Raw] = useState("");
-  const [t4Raw, setT4Raw] = useState("");
-  const [targetBusy, setTargetBusy] = useState({ 1: false, 2: false, 3: false, 4: false });
-
-  // Winner popup (exact match)
-  const [winnerOpen, setWinnerOpen] = useState(false);
-  const [winnerData, setWinnerData] = useState(null);
-
-  // USER LOOKUP
-  const [lookupUN, setLookupUN] = useState("");
-  const [lookupBusy, setLookupBusy] = useState(false);
-  const [lookupErr, setLookupErr] = useState("");
-  const [lookupResult, setLookupResult] = useState(null);
-
-  // ✅ LIFETIME "TOTAL PAID OUT" (MANUAL)
-  const [totalPaidBusy, setTotalPaidBusy] = useState(false);
-  const [totalPaidErr, setTotalPaidErr] = useState("");
-  const [addPaidRaw, setAddPaidRaw] = useState(""); // dollars typed, e.g. "600"
-  const [setPaidRaw, setSetPaidRaw] = useState(""); // dollars typed for absolute set
-
-  // ✅ RESET ALL (paid + AMOE)
-  const [resetBusy, setResetBusy] = useState(false);
-  const [resetErr, setResetErr] = useState("");
-
-  const active = state?.activeContest || null;
-  const last = state?.lastContest || null;
-
-  const totalPaidCents = Number(state?.stats?.totalPaidCents || 0);
-
-  const amoe = state?.amoe || null;
-  const amoeStatus = String(amoe?.status || "COLLECTING");
-  const amoeCount = Number(amoe?.count || 0);
-  const amoePrizeCents = Number(amoe?.prizeCents || 0);
-
-  const targets = active?.targets && typeof active.targets === "object" ? active.targets : {};
-  const projected = active?.projectedWinner || null;
-
-  // Targets are always DAILY4 now (0000–9999)
-  const t1 = useMemo(() => onlyDigits(t1Raw).slice(0, 4), [t1Raw]);
-  const t2 = useMemo(() => onlyDigits(t2Raw).slice(0, 4), [t2Raw]);
-  const t3 = useMemo(() => onlyDigits(t3Raw).slice(0, 4), [t3Raw]);
-  const t4 = useMemo(() => onlyDigits(t4Raw).slice(0, 4), [t4Raw]);
-
-  const amoeGuess = useMemo(() => onlyDigits(amoeGuessRaw).slice(0, 4), [amoeGuessRaw]);
-
-  function dollarsToCents(raw) {
-    const s = String(raw ?? "").trim();
-    if (!s) return null;
-
-    // allow "$600", "600.00"
-    const cleaned = s.replace(/[^0-9.]/g, "");
-    if (!cleaned) return null;
-
-    const n = Number(cleaned);
-    if (!Number.isFinite(n) || n < 0) return null;
-    return Math.round(n * 100);
-  }
-
-  async function adminLoginSubmit(code) {
-    const attempt = String(code || "").trim();
-    if (!attempt || loginBusy) return;
-
+r.post(
+  "/api/admin/login",
+  rateLimit({ routeKey: "admin_login", limit: 20, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
     try {
-      setLoginBusy(true);
-      setErr("");
-      setStatus("");
+      const { code } = req.body || {};
+      const c = String(code || "").trim();
 
-      const r = await apiPost("/api/admin/login", { code: attempt });
-      if (!r?.token) throw new Error("Login did not return a token.");
-      setAdminToken(r.token);
+      if (!ADMIN_TOKEN_SECRET) {
+        return res.status(500).json({ error: "ADMIN_TOKEN_SECRET not configured." });
+      }
 
-      setUnlocked(true);
-      setLoginOpen(false);
-      setStatus("Admin unlocked.");
+      // ✅ compare normalized values (prevents whitespace mismatch / number-vs-string surprises)
+      if (c !== String(ADMIN_CODE || "").trim()) return res.status(401).json({ error: "Unauthorized." });
+
+      const now = nowMs();
+      const token = signAdminToken({
+        v: 1,
+        iat: now,
+        exp: now + TOKEN_TTL_SECONDS * 1000,
+      });
+
+      await auditLog("admin_login", { ok: true }, req);
+
+      return res.json({ token, expiresInSeconds: TOKEN_TTL_SECONDS });
     } catch (e) {
-      setErr(errMsg(e, "Login failed."));
-    } finally {
-      setLoginBusy(false);
+      return res.status(500).json({ error: e.message || "Admin login failed." });
     }
   }
+);
 
-  async function refresh() {
-    if (!unlocked) return;
+/* =========================================================
+   ADMIN — STATS (LIFETIME PAID OUT)
+========================================================= */
+
+r.post(
+  "/api/admin/stats/get",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_stats_get", limit: 60, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
     try {
-      setErr("");
-      const s = await apiPost("/api/admin/state", {});
-      setState(s);
+      const totalPaidCents = await getTotalPaidCents();
+      return res.json({ ok: true, totalPaidCents });
     } catch (e) {
-      setErr(errMsg(e, "Failed to load admin state."));
+      return res.status(500).json({ error: e.message || "Failed to load stats." });
     }
   }
+);
 
-  useEffect(() => {
-    if (!unlocked) return;
-    refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [unlocked]);
-
-  async function withBusy(fn) {
-    if (busy) return;
+r.post(
+  "/api/admin/stats/total-paid/add",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_total_paid_add", limit: 30, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
     try {
-      setBusy(true);
-      await fn();
-    } finally {
-      setBusy(false);
+      const { addCents } = req.body || {};
+      const inc = clampInt(addCents, 0, TOTAL_PAID_CAP_CENTS);
+      if (inc == null) throw new Error("Invalid addCents.");
+
+      const next = await addToTotalPaidCents(inc);
+
+      await auditLog("admin_total_paid_add", { addCents: inc, totalPaidCents: next }, req);
+
+      return res.json({ ok: true, totalPaidCents: next });
+    } catch (e) {
+      return res.status(400).json({ error: e.message || "Failed to update total paid." });
     }
   }
+);
 
-  async function exportPaid() {
-    await withBusy(async () => {
-      try {
-        setStatus("");
-        setErr("");
-        const r = await apiPost("/api/admin/export/paid", {});
-        downloadJson(`drawnfray_paid_export_${r?.payload?.contest?.id || "contest"}.json`, r.payload || r);
-        setStatus("Paid export downloaded.");
-      } catch (e) {
-        setErr(errMsg(e, "Paid export failed."));
-      }
-    });
-  }
+r.post(
+  "/api/admin/stats/total-paid/set",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_total_paid_set", limit: 10, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const { totalPaidCents } = req.body || {};
+      const v = await setTotalPaidCentsAbsolute(totalPaidCents);
 
-  async function exportAmoe() {
-    await withBusy(async () => {
-      try {
-        setStatus("");
-        setErr("");
-        const r = await apiPost("/api/admin/export/amoe", {});
-        downloadJson(`drawnfray_amoe_export_cycle_${r?.payload?.cycleId || "cycle"}.json`, r.payload || r);
-        setStatus("AMOE export downloaded.");
-      } catch (e) {
-        setErr(errMsg(e, "AMOE export failed."));
-      }
-    });
-  }
+      await auditLog("admin_total_paid_set", { totalPaidCents: v }, req);
 
-  async function amoeAdd() {
-    await withBusy(async () => {
-      try {
-        setStatus("");
-        setErr("");
-
-        const nm = String(amoeName || "").trim();
-        const em = String(amoeEmail || "").trim();
-        const ad = String(amoeAddress || "").trim();
-
-        if (nm.length < 2) throw new Error("AMOE name required.");
-        if (!em.includes("@")) throw new Error("AMOE email required.");
-        if (ad.length < 6) throw new Error("AMOE address required.");
-        if (amoeGuess.length !== 4) throw new Error("AMOE guess must be 4 digits (0000–9999).");
-
-        await apiPost("/api/admin/amoe/add", { name: nm, email: em, address: ad, guess: amoeGuess });
-
-        setAmoeGuessRaw("");
-        setStatus("AMOE entry added.");
-        await refresh();
-      } catch (e) {
-        setErr(errMsg(e, "Failed to add AMOE."));
-      }
-    });
-  }
-
-  async function amoeResetCycle() {
-    await withBusy(async () => {
-      try {
-        setStatus("");
-        setErr("");
-
-        const confirmText = `RESET AMOE CYCLE?\n\nThis starts collecting a new AMOE set.\nProceed?`;
-        if (!window.confirm(confirmText)) return;
-
-        await apiPost("/api/admin/amoe/reset-cycle", {});
-        setStatus("AMOE cycle reset.");
-        await refresh();
-      } catch (e) {
-        setErr(errMsg(e, "Failed to reset AMOE cycle."));
-      }
-    });
-  }
-
-  async function submitTarget(slot, raw) {
-    const target = onlyDigits(raw).slice(0, 4);
-    if (target.length !== 4) {
-      setErr("Target must be exactly 4 digits (0000–9999).");
-      return;
+      return res.json({ ok: true, totalPaidCents: v });
+    } catch (e) {
+      return res.status(400).json({ error: e.message || "Failed to set total paid." });
     }
+  }
+);
 
-    if (targetBusy[slot]) return;
+/* =========================================================
+   ADMIN — PRIZE CONFIG (GET/SET)
+========================================================= */
 
-    await withBusy(async () => {
-      let didSetBusy = false;
+r.post(
+  "/api/admin/prize-config/get",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_prize_get", limit: 60, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const cfg = await getPrizeConfig();
+      return res.json({ ok: true, ...cfg });
+    } catch (e) {
+      return res.status(500).json({ error: e.message || "Failed to load prize config." });
+    }
+  }
+);
+
+r.post(
+  "/api/admin/prize-config/set",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_prize_set", limit: 30, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const { weeklyGuaranteedPrizeCents, weeklyBonusPrizeCents } = req.body || {};
+      const v = await setPrizeConfig({ weeklyGuaranteedPrizeCents, weeklyBonusPrizeCents });
+
+      await auditLog("admin_prize_config_set", v, req);
+
+      let activePatch = null;
       try {
-        setStatus("");
-        setErr("");
-
-        const confirmText =
-          `SUBMIT Target #${slot} as ${target}?\n\n` +
-          `This locks that slot.\n` +
-          `System will check ALL entries (Paid + AMOE).\n\n` +
-          `Proceed?`;
-
-        if (!window.confirm(confirmText)) return;
-
-        setTargetBusy((m) => ({ ...m, [slot]: true }));
-        didSetBusy = true;
-
-        const contestId = String(active?.id || "").trim();
-        const body = contestId ? { contestId, slot, targetNumber: target } : { slot, targetNumber: target };
-
-        const r = await apiPost("/api/admin/targets/submit", body);
-
-        // Always refresh state after submit
-        await refresh();
-
-        // Exact match -> show winner popup
-        if (r?.exactHit) {
-          setWinnerData({ ...r, serverNow: Date.now() });
-          setWinnerOpen(true);
-          setStatus("Exact match found. Contest resolved.");
-        } else {
-          setStatus(`Target #${slot} locked. Projected winner updated (if improved).`);
+        const active = await ensureActiveContestNow();
+        if (active?.id) {
+          const snap = await db().collection("contests").doc(active.id).get();
+          if (snap.exists) {
+            const c = snap.data() || {};
+            activePatch = {
+              contestId: active.id,
+              guaranteedPrizeCents: Number(c.guaranteedPrizeCents || 0),
+              bonusPrizeCents: Number(c.bonusPrizeCents || 0),
+              finalPrizeCents: Number(c.finalPrizeCents || 0),
+              entryCount: Number(c.entryCount || 0),
+              activatedAt: c.activatedAt ?? null,
+              resolved: !!c.resolved,
+            };
+          }
         }
-      } catch (e) {
-        setErr(errMsg(e, "Target submit failed."));
-      } finally {
-        if (didSetBusy) setTargetBusy((m) => ({ ...m, [slot]: false }));
-      }
-    });
-  }
+      } catch {}
 
-  // User lookup action
-  async function lookupUser() {
-    const un = String(lookupUN || "").trim();
-    if (!un || lookupBusy) return;
-
-    try {
-      setLookupBusy(true);
-      setLookupErr("");
-      setLookupResult(null);
-
-      const r = await apiPost("/api/admin/user-lookup", { username: un });
-      if (!r?.ok || !r?.user) throw new Error(r?.error || "User not found.");
-
-      setLookupResult(r.user);
+      return res.json({ ok: true, ...v, active: activePatch });
     } catch (e) {
-      setLookupErr(errMsg(e, "Lookup failed."));
-    } finally {
-      setLookupBusy(false);
+      return res.status(400).json({ error: e.message || "Failed to set prize config." });
     }
   }
+);
 
-  // ✅ Total paid out actions (manual)
-  async function totalPaidAdd() {
-    const addCents = dollarsToCents(addPaidRaw);
-    if (addCents == null || totalPaidBusy) return;
+/* =========================================================
+   ADMIN — COMBINED STATE (ACTIVE CONTEST + AMOE STATE)
+========================================================= */
 
-    await withBusy(async () => {
-      try {
-        setTotalPaidBusy(true);
-        setTotalPaidErr("");
-        setStatus("");
-        setErr("");
-
-        const confirmText = `ADD to Lifetime Paid Out?\n\nAdd: ${dollarsFromCents(addCents)}\nProceed?`;
-        if (!window.confirm(confirmText)) return;
-
-        await apiPost("/api/admin/stats/total-paid/add", { addCents });
-        setAddPaidRaw("");
-        setStatus(`Lifetime Paid Out updated (+${dollarsFromCents(addCents)}).`);
-        await refresh();
-      } catch (e) {
-        setTotalPaidErr(errMsg(e, "Failed to update total paid."));
-      } finally {
-        setTotalPaidBusy(false);
+r.post(
+  "/api/admin/state",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_state", limit: 60, windowMs: 5 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const active = await ensureActiveContestNow();
+      if (!active || !active.id) {
+        return res.status(500).json({ error: "Active contest not available." });
       }
-    });
-  }
 
-  async function totalPaidSetAbsolute() {
-    const totalCents = dollarsToCents(setPaidRaw);
-    if (totalCents == null || totalPaidBusy) return;
-
-    await withBusy(async () => {
+      // Ensure Daily4-only (best-effort)
       try {
-        setTotalPaidBusy(true);
-        setTotalPaidErr("");
-        setStatus("");
-        setErr("");
+        if (String(active.mode || "").toUpperCase() !== "DAILY4") {
+          await db().collection("contests").doc(active.id).set({ mode: "DAILY4" }, { merge: true });
+          active.mode = "DAILY4";
+        }
+      } catch {}
 
-        const confirmText =
-          `SET Lifetime Paid Out (ABSOLUTE)?\n\n` +
-          `New value: ${dollarsFromCents(totalCents)}\n\n` +
-          `Type OK to proceed.`;
+      const lastCutoff = mostRecentChicagoCutoffAtOrBefore(nowMs());
+      const lastId = contestIdFromCutoffMs(lastCutoff);
 
-        const ok = window.prompt(confirmText);
-        if (String(ok || "").trim().toUpperCase() !== "OK") return;
+      const lastSnap = await db().collection("contests").doc(lastId).get();
+      const lastContest = lastSnap.exists ? lastSnap.data() : null;
 
-        await apiPost("/api/admin/stats/total-paid/set", { totalPaidCents: totalCents });
-        setSetPaidRaw("");
-        setStatus(`Lifetime Paid Out set to ${dollarsFromCents(totalCents)}.`);
-        await refresh();
-      } catch (e) {
-        setTotalPaidErr(errMsg(e, "Failed to set total paid."));
-      } finally {
-        setTotalPaidBusy(false);
-      }
-    });
+      const { state: amoeState } = await getOrInitAmoeState();
+
+      const totalPaidCents = await getTotalPaidCents();
+      const prizeCfg = await getPrizeConfig();
+
+      const activeGuaranteed = Number(active.guaranteedPrizeCents || prizeCfg.weeklyGuaranteedPrizeCents || 0);
+      const activeBonus = Number(active.bonusPrizeCents || prizeCfg.weeklyBonusPrizeCents || 0);
+      const activeFinal = Number(active.finalPrizeCents || 0) || activeGuaranteed + activeBonus;
+
+      const lastGuaranteed = Number(lastContest?.guaranteedPrizeCents || 0);
+      const lastBonus = Number(lastContest?.bonusPrizeCents || 0);
+      const lastFinal = Number(lastContest?.finalPrizeCents || 0) || lastGuaranteed + lastBonus;
+
+      const targets = active.targets || {};
+      const projected = active.projectedWinner || null;
+
+      return res.json({
+        ok: true,
+        serverNow: nowMs(),
+
+        stats: { totalPaidCents },
+
+        config: {
+          weeklyGuaranteedPrizeCents: prizeCfg.weeklyGuaranteedPrizeCents,
+          weeklyBonusPrizeCents: prizeCfg.weeklyBonusPrizeCents,
+        },
+
+        activeContest: {
+          id: active.id || null,
+          mode: "DAILY4",
+          cutoffAt: active.cutoffAt ?? null,
+          endsOn: active.endsOn ?? null,
+          resolved: !!active.resolved,
+          resolvedAt: active.resolvedAt ?? null,
+
+          // legacy (kept for compatibility)
+          targetNumber: active.targetNumber ?? null,
+
+          // new 4-target flow
+          targets,
+          projectedWinner: projected,
+
+          entryCount: Number(active.entryCount || 0),
+          guaranteedPrizeCents: activeGuaranteed,
+          bonusPrizeCents: activeBonus,
+          finalPrizeCents: activeFinal,
+          activatedAt: active.activatedAt ?? null,
+        },
+
+        lastContest: lastContest
+          ? {
+              id: lastContest.id || lastId,
+              mode: "DAILY4",
+              cutoffAt: lastContest.cutoffAt ?? null,
+              endsOn: lastContest.endsOn ?? null,
+              resolved: !!lastContest.resolved,
+              resolvedAt: lastContest.resolvedAt ?? null,
+              targetNumber: lastContest.targetNumber ?? null,
+              entryCount: Number(lastContest.entryCount || 0),
+              guaranteedPrizeCents: lastGuaranteed,
+              bonusPrizeCents: lastBonus,
+              finalPrizeCents: lastFinal,
+              activatedAt: lastContest.activatedAt ?? null,
+            }
+          : null,
+
+        amoe: {
+          cycleId: amoeState.cycleId ?? 1,
+          status: amoeState.status || "COLLECTING",
+          count: Number(amoeState.count || 0),
+          reachedAt: amoeState.reachedAt ?? null,
+          resolvedAt: amoeState.resolvedAt ?? null,
+          targetNumber: amoeState.targetNumber ?? null,
+          prizeCents: Number(amoeState.prizeCents || AMOE_PRIZE_CENTS),
+          targetCount: AMOE_TARGET_COUNT,
+        },
+      });
+    } catch (e) {
+      return res.status(500).json({ error: e.message || "Failed to load admin state." });
+    }
   }
+);
 
-  // ✅ RESET ALL (paid + AMOE)
-  async function resetAll() {
-    if (resetBusy) return;
+/* =========================================================
+   UNIFIED RESOLVE ENGINE (PAID + AMOE)
+   - 4-digit targets only
+   - Tie-break: same diff -> earlier timestamp wins
+   - Exact match: resolves contest early
+   - Otherwise: updates projectedWinner (best so far)
+========================================================= */
 
-    await withBusy(async () => {
-      try {
-        setResetBusy(true);
-        setResetErr("");
-        setStatus("");
-        setErr("");
+async function computeUnifiedBest({ contestId, targetNumber }) {
+  const target = parse4DigitNumber(targetNumber);
+  if (target == null) throw new Error("Invalid target. Must be exactly 4 digits (0000–9999).");
 
-        const contestId = String(active?.id || "").trim();
+  const entriesSnap = await db().collection("entries").doc(contestId).collection("items").get();
+  if (entriesSnap.empty) throw new Error("No entries.");
 
-        const confirmText =
-          `RESET EVERYTHING?\n\n` +
-          `This will:\n` +
-          `• Delete ALL contest entries (Paid + AMOE mirror)\n` +
-          `• Delete ALL AMOE entries in the current cycle\n` +
-          `• Reset contest state (targets/projection/resolved/entryCount)\n` +
-          `• Advance AMOE cycle (Cycle +1)\n\n` +
-          `Strongly recommended: Export Paid + Export AMOE first.\n\n` +
-          `Type RESET to proceed.`;
+  let totalEntries = entriesSnap.size;
+  let eligibleCount = 0;
+  let best = null;
 
-        const typed = window.prompt(confirmText);
-        if (String(typed || "").trim().toUpperCase() !== "RESET") return;
+  entriesSnap.forEach((doc) => {
+    const e = doc.data();
+    if (!isUnifiedEligible(e)) return;
 
-        const body = contestId ? { contestId } : {};
-        const r = await apiPost("/api/admin/reset-all", body);
+    const guessNum = parse4DigitNumber(e.guess);
+    if (guessNum == null) return;
 
-        setStatus(
-          `Reset complete. Deleted contest entries: ${Number(r?.deletedContestEntries || 0)} • Deleted AMOE entries: ${Number(
-            r?.deletedAmoeEntries || 0
-          )} • AMOE Cycle: ${Number(r?.amoePrevCycleId || 0)} → ${Number(r?.amoeNextCycleId || 0)}`
+    eligibleCount += 1;
+
+    const diff = absDiff(guessNum, target);
+    const ts = Number(e.timestamp || e.createdAt || 0) || 0;
+
+    if (!best || diff < best.diff || (diff === best.diff && ts < best.timestamp)) {
+      best = {
+        id: doc.id,
+        ...e,
+        diff,
+        timestamp: ts,
+        guessNorm: normalizeNumber(guessNum, 4),
+        targetNorm: normalizeNumber(target, 4),
+        exact: diff === 0,
+      };
+    }
+  });
+
+  if (!best) throw new Error("No eligible entries.");
+
+  return {
+    target,
+    targetNorm: normalizeNumber(target, 4),
+    best,
+    eligibleCount,
+    totalEntries,
+  };
+}
+
+r.post(
+  "/api/admin/targets/submit",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_targets_submit", limit: 30, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const { contestId, slot, targetNumber } = req.body || {};
+      const id = pickContestIdOrLast(contestId);
+
+      const s = clampInt(slot, 1, 4);
+      if (s == null) throw new Error("Invalid slot. Must be 1–4.");
+
+      // Compute best OUTSIDE the transaction (avoid non-tx reads inside tx callback)
+      const r0 = await computeUnifiedBest({ contestId: id, targetNumber });
+
+      const contestRef = db().collection("contests").doc(id);
+
+      const result = await db().runTransaction(async (tx) => {
+        const contestSnap = await tx.get(contestRef);
+        if (!contestSnap.exists) throw new Error("No such contest.");
+
+        const contest = contestSnap.data() || {};
+        if (contest.resolved) throw new Error("Already resolved.");
+
+        const targets = contest.targets && typeof contest.targets === "object" ? contest.targets : {};
+        const slotKey = String(s);
+        if (targets[slotKey]?.locked) throw new Error("That target slot is already locked.");
+
+        const drawLabel = slotToLabel(s);
+        const playedAt = nowMs();
+
+        const curProj = contest.projectedWinner || null;
+        const curDiff = curProj ? Number(curProj.diff ?? curProj.dft ?? 1e9) : 1e9;
+        const curTs = curProj ? Number(curProj.entryTimestamp ?? curProj.timestamp ?? 9e15) : 9e15;
+
+        const nextDiff = Number(r0.best.diff);
+        const nextTs = Number(r0.best.timestamp);
+
+        const beatsProjected = nextDiff < curDiff || (nextDiff === curDiff && nextTs < curTs);
+
+        const projectedWinner = beatsProjected
+          ? {
+              winnerUN: r0.best.username || r0.best.winnerUN || r0.best.name || r0.best.email || "—",
+              winnerUserId: r0.best.userId || null,
+              source: String(r0.best.source || (r0.best.paid ? "PAID" : "AMOE") || "").toUpperCase() || null,
+
+              guess: r0.best.guessNorm,
+              diff: r0.best.diff,
+              exact: !!r0.best.exact,
+
+              target: r0.best.targetNorm,
+              drawLabel,
+              playedAt,
+
+              entryTimestamp: r0.best.timestamp,
+              updatedAt: nowMs(),
+            }
+          : curProj;
+
+        const nextTargets = { ...targets };
+        nextTargets[slotKey] = {
+          target: r0.targetNorm,
+          drawLabel,
+          playedAt,
+          locked: true,
+          submittedAt: nowMs(),
+        };
+
+        const exactHit = !!r0.best.exact;
+        const finalizeByClosest = !exactHit && s === 4;
+
+        const patch = {
+          mode: "DAILY4",
+          targets: nextTargets,
+          projectedWinner: projectedWinner || null,
+          targetsUpdatedAt: nowMs(),
+        };
+
+        if (exactHit || finalizeByClosest) {
+          patch.resolved = true;
+          patch.resolvedAt = nowMs();
+          patch.resolvedBy = exactHit ? "EXACT" : "CLOSEST";
+          patch.resolvedSlot = s;
+
+          // legacy
+          patch.targetNumber = exactHit ? r0.targetNorm : projectedWinner?.target ?? r0.targetNorm;
+
+          // snapshot
+          patch.winner = projectedWinner || null;
+        }
+
+        tx.set(contestRef, patch, { merge: true });
+
+        return {
+          contestId: id,
+          slot: s,
+          drawLabel,
+          playedAt,
+          target: r0.targetNorm,
+          exactHit,
+
+          finalized: exactHit || finalizeByClosest,
+          finalizedBy: exactHit ? "EXACT" : finalizeByClosest ? "CLOSEST" : null,
+          finalizedSlot: exactHit || finalizeByClosest ? s : null,
+
+          best: {
+            winnerUN: r0.best.username || r0.best.name || r0.best.email || "—",
+            winnerUserId: r0.best.userId || null,
+            source: String(r0.best.source || (r0.best.paid ? "PAID" : "AMOE") || "").toUpperCase() || null,
+            guess: r0.best.guessNorm,
+            diff: r0.best.diff,
+            entryTimestamp: r0.best.timestamp,
+          },
+          projectedWinner: projectedWinner || null,
+          eligibleCount: r0.eligibleCount,
+          totalEntries: r0.totalEntries,
+        };
+      });
+
+      if (result.finalized) {
+        const contestSnap = await db().collection("contests").doc(result.contestId).get();
+        const contest = contestSnap.exists ? contestSnap.data() || {} : {};
+
+        const guaranteed = Number(contest.guaranteedPrizeCents || 0);
+        const bonus = Number(contest.bonusPrizeCents || 0);
+        const finalPrize = Number(contest.finalPrizeCents || 0) || guaranteed + bonus;
+
+        const proj = contest.winner || contest.projectedWinner || result.projectedWinner || null;
+        if (!proj) throw new Error("No winner could be determined.");
+
+        const record = {
+          contestId: result.contestId,
+          endsOn: contest.endsOn || null,
+          mode: "DAILY4",
+
+          resolvedBy: contest.resolvedBy || result.finalizedBy || (result.exactHit ? "EXACT" : "CLOSEST"),
+          resolvedSlot: Number(contest.resolvedSlot || result.finalizedSlot || result.slot),
+
+          target: proj.target || null,
+          drawLabel: proj.drawLabel || null,
+          playedAt: proj.playedAt || null,
+
+          winnerUN: proj.winnerUN || "—",
+          winnerUserId: proj.winnerUserId || null,
+          source: proj.source || null,
+          guess: proj.guess || null,
+          diff: Number(proj.diff ?? 0),
+          exact: !!proj.exact,
+          entryTimestamp: Number(proj.entryTimestamp ?? 0),
+
+          guaranteedPrizeCents: guaranteed,
+          bonusPrizeCents: bonus,
+          finalPrizeCents: finalPrize,
+
+          resolvedAt: nowMs(),
+          eligibleCount: result.eligibleCount,
+          totalEntries: result.totalEntries,
+        };
+
+        await db().collection("winners").add(record);
+        await trimByResolvedAt("winners", HISTORY_LIMIT);
+
+        await auditLog(
+          "admin_targets_finalize",
+          {
+            contestId: result.contestId,
+            slot: result.slot,
+            finalizedBy: record.resolvedBy,
+            winnerUN: record.winnerUN,
+            target: record.target,
+            diff: record.diff,
+          },
+          req
         );
 
-        // clear local inputs
-        setT1Raw("");
-        setT2Raw("");
-        setT3Raw("");
-        setT4Raw("");
-        setWinnerOpen(false);
-        setWinnerData(null);
-
-        setAmoeName("");
-        setAmoeEmail("");
-        setAmoeAddress("");
-        setAmoeGuessRaw("");
-
-        setLookupUN("");
-        setLookupErr("");
-        setLookupResult(null);
-
-        await refresh();
-      } catch (e) {
-        setResetErr(errMsg(e, "Reset failed."));
-      } finally {
-        setResetBusy(false);
+        return res.json({ ok: true, ...result, winnerRecord: record });
       }
-    });
+
+      await auditLog(
+        "admin_targets_submit",
+        { contestId: result.contestId, slot: result.slot, target: result.target, exactHit: false },
+        req
+      );
+
+      return res.json({ ok: true, ...result });
+    } catch (e) {
+      return res.status(400).json({ error: e.message || "Target submit failed." });
+    }
   }
+);
 
-  const pageStyle = {
-    minHeight: "100svh",
-    width: "100%",
-    display: "grid",
-    placeItems: "center",
-    padding: 18,
-  };
+/* =========================================================
+   ADMIN — RESET (WIPE PAID + AMOE ENTRIES)
+   ✅ SIM FEATURE REMOVED: no sim-only wipe route remains
+========================================================= */
 
-  const cardStyle = {
-    width: "min(1200px, 96vw)",
-    maxHeight: "92vh",
-    overflowY: "auto",
-    overflowX: "hidden",
-    margin: "0 auto",
-    paddingRight: 6, // prevents scrollbar overlap
-  };
+r.post(
+  "/api/admin/reset-all",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_reset_all", limit: 5, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const { contestId } = req.body || {};
 
-  const twoColStyle = {
-    display: "grid",
-    gridTemplateColumns: "1fr 1fr",
-    gap: 12,
-    marginTop: 0,
-    alignItems: "start",
-  };
+      // ALWAYS reset the active contest unless an explicit id is provided
+      const active = await ensureActiveContestNow();
+      const id = String(contestId || active?.id || "").trim();
+      if (!id) return res.status(500).json({ ok: false, error: "Active contest not available." });
 
-  const panelStyle = {
-    padding: 12,
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,0.10)",
-    background: "rgba(255,255,255,0.02)",
-  };
+      const contestRef = db().collection("contests").doc(id);
+      const contestSnap = await contestRef.get();
+      if (!contestSnap.exists) return res.status(400).json({ ok: false, error: "No such contest." });
 
-  const compactRow = { display: "flex", justifyContent: "space-between", gap: 10 };
+      const entriesCol = db().collection("entries").doc(id).collection("items");
+      const deletedContestEntries = await deleteCollectionInBatches(entriesCol, 400);
 
-  // Current Game panel values (best-effort)
-  const paidEntryCount = Number(active?.entryCount || 0);
-  const paidEntryPriceUsd = 10;
-  const paidAmountUsd = paidEntryCount * paidEntryPriceUsd;
+      // ALSO wipe winner docs for this contest so Reveal doesn’t keep showing old results
+      const winnersQuery = db().collection("winners").where("contestId", "==", id);
+      const deletedWinnerRecords = await deleteQueryInBatches(winnersQuery, 400);
 
-  const resolved = !!active?.resolved;
+      const { ref: stateRef, state } = await getOrInitAmoeState();
+      const curCycleId = Number(state.cycleId || 1);
+      const amoeCol = db().collection("amoeEntries").doc(String(curCycleId)).collection("items");
+      const deletedAmoeEntries = await deleteCollectionInBatches(amoeCol, 400);
 
-  if (!unlocked) {
-    return (
-      <main className="adminPage" style={pageStyle}>
-        <div className="adminCard" style={{ ...cardStyle, maxWidth: 560 }}>
-          <h2 style={{ marginTop: 0, marginBottom: 6 }}>Admin Panel</h2>
-          <p style={{ marginTop: 0, marginBottom: 12, opacity: 0.8 }}>Desktop-only. Operational controls.</p>
+      await contestRef.set(
+        {
+          mode: "DAILY4",
 
-          <div className="form" style={{ marginTop: 0 }}>
-            <button className="primary" onClick={() => setLoginOpen(true)} disabled={loginBusy}>
-              Unlock
-            </button>
-          </div>
+          resolved: false,
+          resolvedAt: null,
 
-          {err ? (
-            <p className="status" style={{ color: "#ffb2b2", marginTop: 12 }}>
-              {err}
-            </p>
-          ) : null}
-          {status ? (
-            <p className="status" style={{ opacity: 0.85, marginTop: 12 }}>
-              {status}
-            </p>
-          ) : null}
-        </div>
+          // new 4-target flow fields
+          resolvedBy: null,
+          resolvedSlot: null,
+          winner: null,
 
-        <LoginModal
-          open={loginOpen}
-          onClose={() => setLoginOpen(false)}
-          onSubmit={adminLoginSubmit}
-          err={err}
-          busy={loginBusy}
-        />
-      </main>
-    );
+          // legacy
+          targetNumber: null,
+
+          targets: {},
+          projectedWinner: null,
+          targetsUpdatedAt: null,
+
+          entryCount: 0,
+          resetAt: nowMs(),
+        },
+        { merge: true }
+      );
+
+      const nextCycle = curCycleId + 1;
+      await stateRef.set(
+        {
+          cycleId: nextCycle,
+          status: "COLLECTING",
+          count: 0,
+          reachedAt: null,
+          resolvedAt: null,
+          targetNumber: null,
+          prizeCents: AMOE_PRIZE_CENTS,
+          updatedAt: nowMs(),
+        },
+        { merge: true }
+      );
+
+      await auditLog(
+        "admin_reset_all",
+        {
+          contestId: id,
+          deletedContestEntries,
+          deletedWinnerRecords,
+          deletedAmoeEntries,
+          amoePrevCycleId: curCycleId,
+          amoeNextCycleId: nextCycle,
+        },
+        req
+      );
+
+      return res.json({
+        ok: true,
+        contestId: id,
+        deletedContestEntries,
+        deletedWinnerRecords,
+        deletedAmoeEntries,
+        amoePrevCycleId: curCycleId,
+        amoeNextCycleId: nextCycle,
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: e.message || "Reset failed." });
+    }
   }
+);
 
-  const slotLocked = (slot) => !!targets?.[String(slot)]?.locked;
-  const slotInfo = (slot) => targets?.[String(slot)] || null;
+/* =========================================================
+   ADMIN — PAID PREVIEW + RESOLVE (LEGACY)
+========================================================= */
 
-  return (
-    <main className="adminPage" style={pageStyle}>
-      <div className="adminCard" style={{ ...cardStyle, position: "relative" }}>
-        {/* tiny controls */}
-        <div
-          style={{
-            position: "absolute",
-            top: 10,
-            right: 10,
-            display: "flex",
-            gap: 8,
-            zIndex: 2,
-          }}
-        >
-          <button
-            className="secondary"
-            onClick={refresh}
-            title="Refresh"
-            aria-label="Refresh"
-            disabled={busy}
-            style={{
-              width: 40,
-              height: 36,
-              padding: 0,
-              display: "grid",
-              placeItems: "center",
-              borderRadius: 12,
-              opacity: busy ? 0.6 : 1,
-            }}
-          >
-            ↻
-          </button>
+async function computePaidWinner({ contestId, targetNumber }) {
+  const contestRef = db().collection("contests").doc(contestId);
+  const contestSnap = await contestRef.get();
+  if (!contestSnap.exists) throw new Error("No such contest.");
 
-          <button
-            className="secondary"
-            onClick={() => (window.location.href = "/")}
-            title="Exit"
-            aria-label="Exit to landing"
-            disabled={busy}
-            style={{
-              width: 40,
-              height: 36,
-              padding: 0,
-              display: "grid",
-              placeItems: "center",
-              borderRadius: 12,
-              opacity: busy ? 0.6 : 1,
-            }}
-          >
-            ⤴
-          </button>
-        </div>
+  const contest = contestSnap.data() || {};
 
-        <div style={twoColStyle}>
-          {/* LEFT: PAID WEEKLY GAME */}
-          <section style={panelStyle}>
-            <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
-              Paid Weekly Game
-            </div>
+  const target = parse4DigitNumber(targetNumber);
+  if (target == null) throw new Error("Invalid target.");
 
-            {/* Daily4-only indicator */}
-            <div
-              style={{
-                padding: "10px 12px",
-                borderRadius: 12,
-                border: "1px solid rgba(255,255,255,0.10)",
-                background: "rgba(255,255,255,0.01)",
-                marginBottom: 10,
-              }}
-            >
-              <div style={compactRow}>
-                <span className="label">Mode</span>
-                <span className="value">DAILY4</span>
-              </div>
-              <div className="miniMuted" style={{ marginTop: 6, textAlign: "center" }}>
-                Primary mode is locked to DAILY4.
-              </div>
-            </div>
+  const entriesSnap = await db().collection("entries").doc(contestId).collection("items").get();
+  if (entriesSnap.empty) throw new Error("No entries.");
 
-            {/* Current Game panel */}
-            <div
-              style={{
-                padding: "10px 12px",
-                borderRadius: 12,
-                border: "1px solid rgba(255,255,255,0.10)",
-                background: "rgba(255,255,255,0.01)",
-              }}
-            >
-              <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
-                Current Game
-              </div>
+  let eligibleCount = 0;
+  let winner = null;
 
-              <div style={{ display: "grid", gap: 6 }}>
-                <div style={compactRow}>
-                  <span className="label">Paid Entries</span>
-                  <span className="value">{Number.isFinite(paidEntryCount) ? paidEntryCount : 0}</span>
-                </div>
+  entriesSnap.forEach((doc) => {
+    const e = doc.data();
+    if (!isPaidEntryEligible(e)) return;
 
-                <div style={compactRow}>
-                  <span className="label">Dollar Amount</span>
-                  <span className="value">${Number.isFinite(paidAmountUsd) ? paidAmountUsd.toLocaleString("en-US") : "0"}</span>
-                </div>
+    const guessNum = parse4DigitNumber(e.guess);
+    if (guessNum == null) return;
 
-                <div style={compactRow}>
-                  <span className="label">Today</span>
-                  <span className="value">{new Date().toLocaleDateString()}</span>
-                </div>
+    eligibleCount += 1;
 
-                <div style={compactRow}>
-                  <span className="label">Game Ending On</span>
-                  <span className="value">{active?.endsOn || "—"}</span>
-                </div>
+    const diff = absDiff(guessNum, target);
+    const ts = Number(e.timestamp || e.createdAt || 0) || 0;
 
-                <div style={compactRow}>
-                  <span className="label">Server Time</span>
-                  <span className="value">{formatTS(state?.serverNow || null)}</span>
-                </div>
+    if (!winner || diff < winner.diff || (diff === winner.diff && ts < Number(winner.timestamp || 0))) {
+      winner = { ...e, diff, timestamp: ts };
+    }
+  });
 
-                <div style={compactRow}>
-                  <span className="label">Resolved</span>
-                  <span className="value">{resolved ? "YES" : "NO"}</span>
-                </div>
-              </div>
+  if (!winner) throw new Error("No eligible paid entries.");
 
-              {projected ? (
-                <div
-                  style={{
-                    marginTop: 10,
-                    paddingTop: 10,
-                    borderTop: "1px solid rgba(255,255,255,0.08)",
-                    display: "grid",
-                    gap: 6,
-                  }}
-                >
-                  <div className="label" style={{ textAlign: "center" }}>
-                    Projected Winner (Best DFT So Far)
-                  </div>
-
-                  <div style={compactRow}>
-                    <span className="label">UN</span>
-                    <span className="value">{projected?.winnerUN || "—"}</span>
-                  </div>
-
-                  <div style={compactRow}>
-                    <span className="label">Entry • DFT</span>
-                    <span className="value">
-                      {projected?.guess || "—"} • {String(projected?.diff ?? "—")}
-                    </span>
-                  </div>
-
-                  <div style={compactRow}>
-                    <span className="label">Target</span>
-                    <span className="value">
-                      {projected?.drawLabel || "—"} · {projected?.target || "—"}
-                    </span>
-                  </div>
-
-                  <div style={compactRow}>
-                    <span className="label">Entry TS</span>
-                    <span className="value">{formatTS(projected?.entryTimestamp || null)}</span>
-                  </div>
-
-                  <div className="miniMuted" style={{ textAlign: "center" }}>
-                    Tie rule enforced: same DFT keeps the earlier timestamp.
-                  </div>
-                </div>
-              ) : null}
-            </div>
-
-            {/* Resolve Targets (Unified) */}
-            <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-              <div
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  border: "1px solid rgba(255,255,255,0.10)",
-                  background: "rgba(255,255,255,0.01)",
-                }}
-              >
-                <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
-                  Resolve Targets (4 Draws)
-                </div>
-
-                <div className="miniMuted" style={{ textAlign: "center", marginBottom: 10 }}>
-                  Submit targets one at a time. Each slot locks after submit. System checks Paid + AMOE.
-                </div>
-
-                {/* Slot 1 */}
-                <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
-                  <div style={compactRow}>
-                    <span className="label">Target #1</span>
-                    <span className="value">{slotLocked(1) ? "LOCKED" : "OPEN"}</span>
-                  </div>
-
-                  <input
-                    className="field"
-                    type="text"
-                    inputMode="numeric"
-                    placeholder="0000–9999"
-                    value={t1}
-                    onChange={(e) => setT1Raw(e.target.value)}
-                    disabled={busy || slotLocked(1) || resolved}
-                  />
-
-                  <button
-                    className="primary"
-                    onClick={() => submitTarget(1, t1)}
-                    disabled={busy || resolved || slotLocked(1) || t1.length !== 4 || targetBusy[1]}
-                  >
-                    {targetBusy[1] ? "Submitting…" : "Submit Target #1 (Locks Slot)"}
-                  </button>
-
-                  {slotLocked(1) ? (
-                    <div className="miniMuted" style={{ textAlign: "center" }}>
-                      {slotInfo(1)?.drawLabel || "—"} · {slotInfo(1)?.target || "—"} •{" "}
-                      {formatTS(slotInfo(1)?.playedAt || null)}
-                    </div>
-                  ) : null}
-                </div>
-
-                {/* Slot 2 */}
-                <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
-                  <div style={compactRow}>
-                    <span className="label">Target #2</span>
-                    <span className="value">{slotLocked(2) ? "LOCKED" : "OPEN"}</span>
-                  </div>
-
-                  <input
-                    className="field"
-                    type="text"
-                    inputMode="numeric"
-                    placeholder="0000–9999"
-                    value={t2}
-                    onChange={(e) => setT2Raw(e.target.value)}
-                    disabled={busy || slotLocked(2) || resolved}
-                  />
-
-                  <button
-                    className="secondary"
-                    onClick={() => submitTarget(2, t2)}
-                    disabled={busy || resolved || slotLocked(2) || t2.length !== 4 || targetBusy[2]}
-                  >
-                    {targetBusy[2] ? "Submitting…" : "Submit Target #2 (Locks Slot)"}
-                  </button>
-
-                  {slotLocked(2) ? (
-                    <div className="miniMuted" style={{ textAlign: "center" }}>
-                      {slotInfo(2)?.drawLabel || "—"} · {slotInfo(2)?.target || "—"} •{" "}
-                      {formatTS(slotInfo(2)?.playedAt || null)}
-                    </div>
-                  ) : null}
-                </div>
-
-                {/* Slot 3 */}
-                <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
-                  <div style={compactRow}>
-                    <span className="label">Target #3</span>
-                    <span className="value">{slotLocked(3) ? "LOCKED" : "OPEN"}</span>
-                  </div>
-
-                  <input
-                    className="field"
-                    type="text"
-                    inputMode="numeric"
-                    placeholder="0000–9999"
-                    value={t3}
-                    onChange={(e) => setT3Raw(e.target.value)}
-                    disabled={busy || slotLocked(3) || resolved}
-                  />
-
-                  <button
-                    className="secondary"
-                    onClick={() => submitTarget(3, t3)}
-                    disabled={busy || resolved || slotLocked(3) || t3.length !== 4 || targetBusy[3]}
-                  >
-                    {targetBusy[3] ? "Submitting…" : "Submit Target #3 (Locks Slot)"}
-                  </button>
-
-                  {slotLocked(3) ? (
-                    <div className="miniMuted" style={{ textAlign: "center" }}>
-                      {slotInfo(3)?.drawLabel || "—"} · {slotInfo(3)?.target || "—"} •{" "}
-                      {formatTS(slotInfo(3)?.playedAt || null)}
-                    </div>
-                  ) : null}
-                </div>
-
-                {/* Slot 4 */}
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={compactRow}>
-                    <span className="label">Target #4</span>
-                    <span className="value">{slotLocked(4) ? "LOCKED" : "OPEN"}</span>
-                  </div>
-
-                  <input
-                    className="field"
-                    type="text"
-                    inputMode="numeric"
-                    placeholder="0000–9999"
-                    value={t4}
-                    onChange={(e) => setT4Raw(e.target.value)}
-                    disabled={busy || slotLocked(4) || resolved}
-                  />
-
-                  <button
-                    className="secondary"
-                    onClick={() => submitTarget(4, t4)}
-                    disabled={busy || resolved || slotLocked(4) || t4.length !== 4 || targetBusy[4]}
-                  >
-                    {targetBusy[4] ? "Submitting…" : "Submit Target #4 (Locks Slot)"}
-                  </button>
-
-                  {slotLocked(4) ? (
-                    <div className="miniMuted" style={{ textAlign: "center" }}>
-                      {slotInfo(4)?.drawLabel || "—"} · {slotInfo(4)?.target || "—"} •{" "}
-                      {formatTS(slotInfo(4)?.playedAt || null)}
-                    </div>
-                  ) : null}
-                </div>
-
-                {resolved ? (
-                  <div
-                    style={{
-                      marginTop: 10,
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      border: "1px solid rgba(201,75,75,0.45)",
-                      background: "rgba(201,75,75,0.10)",
-                      textAlign: "center",
-                      fontSize: 13,
-                    }}
-                  >
-                    Contest is resolved. Targets are locked.
-                  </div>
-                ) : null}
-              </div>
-
-              {/* Exports */}
-              <button className="secondary" onClick={exportPaid} disabled={busy}>
-                Export Paid Summary (JSON)
-              </button>
-
-              {/* ✅ RESET EVERYTHING (paid + AMOE) */}
-              <div
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  border: "1px solid rgba(201,75,75,0.45)",
-                  background: "rgba(201,75,75,0.06)",
-                }}
-              >
-                <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
-                  Reset Everything (Paid + AMOE)
-                </div>
-
-                <div className="miniMuted" style={{ textAlign: "center" }}>
-                  This wipes entries and resets contest state. Export first.
-                </div>
-
-                <button
-                  className="secondary"
-                  onClick={resetAll}
-                  style={{ marginTop: 10, width: "100%", borderColor: "rgba(201,75,75,0.55)" }}
-                  disabled={busy || resetBusy}
-                >
-                  {resetBusy ? "Resetting…" : "Reset All (Type RESET)"}
-                </button>
-
-                {resetErr ? <div style={{ color: "#ffb2b2", fontSize: 13, marginTop: 8 }}>{resetErr}</div> : null}
-              </div>
-
-              {/* ✅ LIFETIME PAID OUT (MANUAL) */}
-              <div
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  border: "1px solid rgba(255,255,255,0.10)",
-                  background: "rgba(255,255,255,0.01)",
-                }}
-              >
-                <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
-                  Lifetime Paid Out (Manual)
-                </div>
-
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={compactRow}>
-                    <span className="label">Current Total</span>
-                    <span className="value">{dollarsFromCents(totalPaidCents)}</span>
-                  </div>
-
-                  <div className="miniMuted" style={{ textAlign: "center" }}>
-                    Update this after you actually pay winners via your processor.
-                  </div>
-
-                  <div style={{ display: "grid", gap: 8, marginTop: 6 }}>
-                    <input
-                      className="field"
-                      inputMode="decimal"
-                      placeholder="Add amount (USD) e.g. 600"
-                      value={addPaidRaw}
-                      onChange={(e) => setAddPaidRaw(e.target.value)}
-                      disabled={busy || totalPaidBusy}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") totalPaidAdd();
-                      }}
-                    />
-
-                    <button
-                      className="secondary"
-                      onClick={totalPaidAdd}
-                      disabled={busy || totalPaidBusy || dollarsToCents(addPaidRaw) == null}
-                    >
-                      {totalPaidBusy ? "Updating…" : "Add to Total Paid Out"}
-                    </button>
-
-                    <div style={{ height: 1, background: "rgba(255,255,255,0.08)" }} />
-
-                    <input
-                      className="field"
-                      inputMode="decimal"
-                      placeholder="Set absolute total (USD) e.g. 1200"
-                      value={setPaidRaw}
-                      onChange={(e) => setSetPaidRaw(e.target.value)}
-                      disabled={busy || totalPaidBusy}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") totalPaidSetAbsolute();
-                      }}
-                    />
-
-                    <button
-                      className="secondary"
-                      onClick={totalPaidSetAbsolute}
-                      style={{ borderColor: "rgba(201,75,75,0.45)" }}
-                      disabled={busy || totalPaidBusy || dollarsToCents(setPaidRaw) == null}
-                    >
-                      {totalPaidBusy ? "Updating…" : "Set Total Paid Out (Danger)"}
-                    </button>
-
-                    {totalPaidErr ? <div style={{ color: "#ffb2b2", fontSize: 13 }}>{totalPaidErr}</div> : null}
-                  </div>
-                </div>
-              </div>
-
-              {/* USER LOOKUP */}
-              <div
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  border: "1px solid rgba(255,255,255,0.10)",
-                  background: "rgba(255,255,255,0.01)",
-                }}
-              >
-                <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
-                  User Lookup (Email + Phone by UN)
-                </div>
-
-                <div style={{ display: "grid", gap: 8 }}>
-                  <input
-                    className="field"
-                    placeholder="Enter UN (username)"
-                    value={lookupUN}
-                    onChange={(e) => setLookupUN(e.target.value)}
-                    disabled={busy || lookupBusy}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") lookupUser();
-                    }}
-                  />
-
-                  <button className="secondary" onClick={lookupUser} disabled={busy || lookupBusy || !String(lookupUN || "").trim()}>
-                    {lookupBusy ? "Searching…" : "Search"}
-                  </button>
-
-                  {lookupErr ? <div style={{ color: "#ffb2b2", fontSize: 13 }}>{lookupErr}</div> : null}
-
-                  {lookupResult ? (
-                    <div style={{ display: "grid", gap: 6 }}>
-                      <div style={compactRow}>
-                        <span className="label">UN</span>
-                        <span className="value">{lookupResult.username || "—"}</span>
-                      </div>
-                      <div style={compactRow}>
-                        <span className="label">Email</span>
-                        <span className="value">{lookupResult.email || "—"}</span>
-                      </div>
-                      <div style={compactRow}>
-                        <span className="label">Phone</span>
-                        <span className="value">{lookupResult.phone || "—"}</span>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="miniMuted" style={{ textAlign: "center" }}>
-                      Use this to quickly retrieve contact info.
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Optional: show last contest quick info (keeps the state visible, prevents "last" being unused if you expand later) */}
-              {last ? (
-                <div className="miniMuted" style={{ textAlign: "center", marginTop: 4, opacity: 0.8 }}>
-                  Last contest: {last.id || "—"} • Resolved: {last.resolved ? "YES" : "NO"}
-                </div>
-              ) : null}
-            </div>
-          </section>
-
-          {/* RIGHT: AMOE */}
-          <section style={panelStyle}>
-            <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
-              AMOE
-            </div>
-
-            <div style={{ display: "grid", gap: 8 }}>
-              <div style={compactRow}>
-                <span className="label">Status</span>
-                <span className="value">{amoeStatus}</span>
-              </div>
-              <div style={compactRow}>
-                <span className="label">Count</span>
-                <span className="value">{amoeCount}</span>
-              </div>
-              <div style={compactRow}>
-                <span className="label">Prize</span>
-                <span className="value">{dollarsFromCents(amoePrizeCents)}</span>
-              </div>
-
-              <div style={{ marginTop: 4, display: "grid", gap: 6 }}>
-                <div className="label" style={{ textAlign: "center" }}>
-                  Add AMOE Entry (Manual)
-                </div>
-
-                <input className="field" placeholder="Full legal name" value={amoeName} onChange={(e) => setAmoeName(e.target.value)} disabled={busy} />
-                <input className="field" placeholder="Email" value={amoeEmail} onChange={(e) => setAmoeEmail(e.target.value)} disabled={busy} />
-                <input className="field" placeholder="Mailing address" value={amoeAddress} onChange={(e) => setAmoeAddress(e.target.value)} disabled={busy} />
-                <input
-                  className="field"
-                  type="text"
-                  inputMode="numeric"
-                  placeholder="AMOE guess (0000–9999)"
-                  value={amoeGuess}
-                  onChange={(e) => setAmoeGuessRaw(e.target.value)}
-                  disabled={busy}
-                />
-
-                <button className="primary" onClick={amoeAdd} disabled={busy || amoeGuess.length !== 4}>
-                  Add AMOE Entry
-                </button>
-
-                <div className="miniMuted" style={{ textAlign: "center" }}>
-                  AMOE entries are checked by the same 4 targets (Paid + AMOE together).
-                </div>
-              </div>
-
-              <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
-                <button className="secondary" onClick={exportAmoe} disabled={busy}>
-                  Export AMOE Summary (JSON)
-                </button>
-                <button
-                  className="secondary"
-                  onClick={amoeResetCycle}
-                  style={{ borderColor: "rgba(201,75,75,0.45)" }}
-                  disabled={busy}
-                >
-                  Reset AMOE Cycle (Start New Collection)
-                </button>
-              </div>
-            </div>
-          </section>
-        </div>
-
-        {status ? (
-          <p className="status" style={{ opacity: 0.9, marginTop: 10 }}>
-            {status}
-          </p>
-        ) : null}
-        {err ? (
-          <p className="status" style={{ color: "#ffb2b2", marginTop: 10 }}>
-            {err}
-          </p>
-        ) : null}
-
-        {busy ? (
-          <p className="status" style={{ opacity: 0.6, marginTop: 6 }}>
-            Working…
-          </p>
-        ) : null}
-
-        <WinnerModal
-          open={winnerOpen}
-          onClose={() => {
-            setWinnerOpen(false);
-            setWinnerData(null);
-          }}
-          data={winnerData}
-        />
-      </div>
-    </main>
-  );
+  return {
+    contest,
+    targetNorm: normalizeNumber(target, 4),
+    winner,
+    eligibleCount,
+    totalEntries: entriesSnap.size,
+  };
 }
+
+r.post(
+  "/api/admin/paid/preview",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_paid_preview", limit: 60, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const { targetNumber, contestId } = req.body || {};
+      const id = pickContestIdOrLast(contestId);
+
+      const r0 = await computePaidWinner({ contestId: id, targetNumber });
+
+      const guaranteed = Number(r0.contest.guaranteedPrizeCents || 0);
+      const bonus = Number(r0.contest.bonusPrizeCents || 0);
+      const finalPrize = Number(r0.contest.finalPrizeCents || 0) || guaranteed + bonus;
+
+      return res.json({
+        ok: true,
+        contestId: id,
+        endsOn: r0.contest.endsOn || null,
+        mode: "DAILY4",
+        target: r0.targetNorm,
+        eligibleCount: r0.eligibleCount,
+        totalEntries: r0.totalEntries,
+        winnerUN: r0.winner.username,
+        winnerUserId: r0.winner.userId || null,
+        guess: r0.winner.guess,
+        diff: r0.winner.diff,
+        entryTimestamp: r0.winner.timestamp,
+        guaranteedPrizeCents: guaranteed,
+        bonusPrizeCents: bonus,
+        finalPrizeCents: finalPrize,
+      });
+    } catch (e) {
+      return res.status(400).json({ error: e.message || "Preview failed." });
+    }
+  }
+);
+
+r.post(
+  "/api/admin/resolve",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_resolve_paid", limit: 20, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const { targetNumber, contestId } = req.body || {};
+      const id = pickContestIdOrLast(contestId);
+
+      const contestRef = db().collection("contests").doc(id);
+      const contestSnap = await contestRef.get();
+      if (!contestSnap.exists) return res.status(400).json({ error: "No such contest." });
+
+      const contest = contestSnap.data() || {};
+      if (contest.resolved) return res.status(400).json({ error: "Already resolved." });
+
+      const r0 = await computePaidWinner({ contestId: id, targetNumber });
+
+      const guaranteed = Number(contest.guaranteedPrizeCents || 0);
+      const bonus = Number(contest.bonusPrizeCents || 0);
+      const finalPrize = Number(contest.finalPrizeCents || 0) || guaranteed + bonus;
+
+      const record = {
+        contestId: contest.id || id,
+        endsOn: contest.endsOn || null,
+        mode: "DAILY4",
+        target: r0.targetNorm,
+        winnerUN: r0.winner.username,
+        winnerUserId: r0.winner.userId || null,
+        guess: r0.winner.guess,
+        diff: r0.winner.diff,
+        exact: Number(r0.winner.diff) === 0,
+        guaranteedPrizeCents: guaranteed,
+        bonusPrizeCents: bonus,
+        finalPrizeCents: finalPrize,
+        resolvedAt: nowMs(),
+        entryTimestamp: r0.winner.timestamp,
+        eligibleCount: r0.eligibleCount,
+        totalEntries: r0.totalEntries,
+      };
+
+      await db().collection("winners").add(record);
+      await trimByResolvedAt("winners", HISTORY_LIMIT);
+
+      await contestRef.set(
+        {
+          mode: "DAILY4",
+          resolved: true,
+          resolvedAt: record.resolvedAt,
+          targetNumber: record.target,
+          guaranteedPrizeCents: guaranteed,
+          bonusPrizeCents: bonus,
+          finalPrizeCents: finalPrize,
+        },
+        { merge: true }
+      );
+
+      await auditLog(
+        "admin_resolve_paid",
+        { contestId: contest.id || id, target: record.target, finalPrizeCents: finalPrize },
+        req
+      );
+
+      return res.json({ ok: true, ...record });
+    } catch (e) {
+      return res.status(400).json({ error: e.message || "Failed to post results." });
+    }
+  }
+);
+
+/* =========================================================
+   ADMIN — AMOE CONTROLS
+========================================================= */
+
+function cleanEmail(s) {
+  return String(s || "").trim().toLowerCase();
+}
+function cleanName(s) {
+  return String(s || "").trim();
+}
+function cleanAddr(s) {
+  return String(s || "").trim();
+}
+
+r.post(
+  "/api/admin/amoe/add",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_amoe_add", limit: 120, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const { name, email, address, guess, receivedAt } = req.body || {};
+
+      const nm = cleanName(name);
+      const em = cleanEmail(email);
+      const addr = cleanAddr(address);
+
+      if (nm.length < 2) return res.status(400).json({ error: "Name required." });
+      if (!em.includes("@")) return res.status(400).json({ error: "Valid email required." });
+      if (addr.length < 6) return res.status(400).json({ error: "Address required." });
+
+      const n = parse4DigitNumber(guess);
+      if (n == null) return res.status(400).json({ error: "Invalid AMOE number. Must be 0000–9999." });
+
+      const recv = receivedAt ? Number(receivedAt) : nowMs();
+      const { ref: stateRef, state } = await getOrInitAmoeState();
+
+      const status = String(state.status || "COLLECTING");
+      if (status === "RESOLVED") {
+        return res.status(400).json({ error: "AMOE cycle is resolved. Reset cycle to start again." });
+      }
+
+      const cycleId = Number(state.cycleId || 1);
+
+      const dupeSnap = await db()
+        .collection("amoeEntries")
+        .doc(String(cycleId))
+        .collection("items")
+        .where("emailLower", "==", em)
+        .limit(1)
+        .get();
+
+      if (!dupeSnap.empty) {
+        return res.status(400).json({
+          error: "An AMOE entry already exists for this email in the current cycle.",
+        });
+      }
+
+      const entryDoc = await db()
+        .collection("amoeEntries")
+        .doc(String(cycleId))
+        .collection("items")
+        .add({
+          name: nm,
+          email: em,
+          emailLower: em,
+          address: addr,
+          guess: normalizeNumber(n, 4),
+          receivedAt: recv,
+          timestamp: recv,
+          createdAt: nowMs(),
+        });
+
+      // Mirror into ACTIVE contest pool (this is what makes it “claim” a number)
+      const active = await ensureActiveContestNow();
+      if (active?.id) {
+        await db()
+          .collection("entries")
+          .doc(active.id)
+          .collection("items")
+          .add({
+            paid: false,
+            status: "AMOE",
+            source: "AMOE",
+            isAmoe: true,
+            countedInContest: true,
+
+            name: nm,
+            email: em,
+            address: addr,
+
+            username: nm,
+            guess: normalizeNumber(n, 4),
+
+            timestamp: recv,
+            createdAt: nowMs(),
+            amoeCycleId: cycleId,
+            amoeEntryId: entryDoc.id,
+          });
+      }
+
+      const nextCount = Number(state.count || 0) + 1;
+
+      const patch = {
+        count: nextCount,
+        status: "COLLECTING",
+        updatedAt: nowMs(),
+        prizeCents: Number(state.prizeCents || AMOE_PRIZE_CENTS),
+      };
+
+      await stateRef.set(patch, { merge: true });
+
+      await auditLog(
+        "admin_amoe_add",
+        { cycleId, entryId: entryDoc.id, email: em, guess: normalizeNumber(n, 4), count: nextCount },
+        req
+      );
+
+      return res.json({
+        ok: true,
+        cycleId,
+        entryId: entryDoc.id,
+        count: nextCount,
+        status: "COLLECTING",
+      });
+    } catch (e) {
+      return res.status(500).json({ error: e.message || "Failed to add AMOE entry." });
+    }
+  }
+);
+
+async function computeAmoeWinner({ targetNumber }) {
+  const { ref: stateRef, state } = await getOrInitAmoeState();
+  const cycleId = Number(state.cycleId || 1);
+
+  const target = parse4DigitNumber(targetNumber);
+  if (target == null) throw new Error("Invalid target. Must be 0000–9999.");
+
+  const entriesSnap = await db().collection("amoeEntries").doc(String(cycleId)).collection("items").get();
+  if (entriesSnap.empty) throw new Error("No AMOE entries.");
+
+  let winner = null;
+  let count = 0;
+
+  entriesSnap.forEach((doc) => {
+    const e = doc.data();
+    count += 1;
+
+    const guessNum = parse4DigitNumber(e.guess);
+    if (guessNum == null) return;
+
+    const diff = absDiff(guessNum, target);
+    const ts = Number(e.timestamp || 0) || 0;
+
+    if (!winner || diff < winner.diff || (diff === winner.diff && ts < Number(winner.timestamp || 0))) {
+      winner = { id: doc.id, ...e, diff, timestamp: ts };
+    }
+  });
+
+  if (!winner) throw new Error("No AMOE winner computed.");
+
+  return { stateRef, state, cycleId, targetNorm: normalizeNumber(target, 4), winner, count };
+}
+
+r.post(
+  "/api/admin/amoe/preview",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_amoe_preview", limit: 60, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const { targetNumber } = req.body || {};
+      const r0 = await computeAmoeWinner({ targetNumber });
+
+      return res.json({
+        ok: true,
+        cycleId: r0.cycleId,
+        target: r0.targetNorm,
+        entryCount: r0.count,
+        prizeCents: Number(r0.state.prizeCents || AMOE_PRIZE_CENTS),
+        winnerName: r0.winner.name,
+        winnerEmail: r0.winner.email,
+        guess: r0.winner.guess,
+        diff: r0.winner.diff,
+        entryTimestamp: r0.winner.timestamp,
+      });
+    } catch (e) {
+      return res.status(400).json({ error: e.message || "AMOE preview failed." });
+    }
+  }
+);
+
+r.post(
+  "/api/admin/amoe/resolve",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_amoe_resolve", limit: 20, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const { targetNumber } = req.body || {};
+      const r0 = await computeAmoeWinner({ targetNumber });
+
+      const record = {
+        cycleId: r0.cycleId,
+        target: r0.targetNorm,
+        prizeCents: Number(r0.state.prizeCents || AMOE_PRIZE_CENTS),
+        winnerName: r0.winner.name,
+        winnerEmail: r0.winner.email,
+        winnerAddress: r0.winner.address,
+        guess: r0.winner.guess,
+        diff: r0.winner.diff,
+        entryTimestamp: r0.winner.timestamp,
+        resolvedAt: nowMs(),
+        entryCount: r0.count,
+      };
+
+      await db().collection("amoeWinners").add(record);
+      await trimByResolvedAt("amoeWinners", HISTORY_LIMIT);
+
+      await r0.stateRef.set(
+        {
+          status: "RESOLVED",
+          resolvedAt: record.resolvedAt,
+          targetNumber: record.target,
+          updatedAt: nowMs(),
+        },
+        { merge: true }
+      );
+
+      await auditLog(
+        "admin_amoe_resolve",
+        { cycleId: r0.cycleId, target: record.target, prizeCents: record.prizeCents },
+        req
+      );
+
+      return res.json({ ok: true, ...record });
+    } catch (e) {
+      return res.status(400).json({ error: e.message || "Failed to resolve AMOE." });
+    }
+  }
+);
+
+r.post(
+  "/api/admin/amoe/reset-cycle",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_amoe_reset_cycle", limit: 10, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const { ref: stateRef, state } = await getOrInitAmoeState();
+      const nextCycle = Number(state.cycleId || 1) + 1;
+
+      await stateRef.set(
+        {
+          cycleId: nextCycle,
+          status: "COLLECTING",
+          count: 0,
+          reachedAt: null,
+          resolvedAt: null,
+          targetNumber: null,
+          prizeCents: AMOE_PRIZE_CENTS,
+          updatedAt: nowMs(),
+        },
+        { merge: true }
+      );
+
+      await auditLog("admin_amoe_reset_cycle", { cycleId: nextCycle }, req);
+
+      return res.json({ ok: true, cycleId: nextCycle });
+    } catch (e) {
+      return res.status(500).json({ error: e.message || "Failed to reset AMOE cycle." });
+    }
+  }
+);
+
+/* =========================================================
+   ADMIN — EXPORTS (PAID + AMOE)
+========================================================= */
+
+r.post(
+  "/api/admin/export/paid",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_export_paid", limit: 20, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const { contestId } = req.body || {};
+      const id = pickContestIdOrLast(contestId);
+
+      const contestSnap = await db().collection("contests").doc(id).get();
+      if (!contestSnap.exists) return res.status(400).json({ error: "No such contest." });
+
+      const contest = contestSnap.data() || {};
+
+      const entriesSnap = await db().collection("entries").doc(id).collection("items").get();
+      const entries = entriesSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+      const winnerSnap = await db()
+        .collection("winners")
+        .where("contestId", "==", id)
+        .orderBy("resolvedAt", "desc")
+        .limit(1)
+        .get();
+
+      const winner = winnerSnap.empty ? null : { id: winnerSnap.docs[0].id, ...winnerSnap.docs[0].data() };
+
+      const guaranteed = Number(contest.guaranteedPrizeCents || 0);
+      const bonus = Number(contest.bonusPrizeCents || 0);
+      const finalPrize = Number(contest.finalPrizeCents || 0) || guaranteed + bonus;
+
+      const payload = {
+        kind: "PAID_EXPORT",
+        exportedAt: nowMs(),
+        contest: {
+          id: contest.id || id,
+          endsOn: contest.endsOn ?? null,
+          cutoffAt: contest.cutoffAt ?? null,
+          mode: "DAILY4",
+          activatedAt: contest.activatedAt ?? null,
+          resolved: !!contest.resolved,
+          resolvedAt: contest.resolvedAt ?? null,
+          targetNumber: contest.targetNumber ?? null,
+          targets: contest.targets ?? {},
+          projectedWinner: contest.projectedWinner ?? null,
+          winner: contest.winner ?? null,
+          resolvedBy: contest.resolvedBy ?? null,
+          resolvedSlot: contest.resolvedSlot ?? null,
+          entryCount: Number(contest.entryCount || 0),
+          guaranteedPrizeCents: guaranteed,
+          bonusPrizeCents: bonus,
+          finalPrizeCents: finalPrize,
+        },
+        winner,
+        entriesCountTotal: entries.length,
+        entries,
+      };
+
+      await auditLog("admin_export_paid", { contestId: id, entries: entries.length }, req);
+
+      return res.json({ ok: true, payload });
+    } catch (e) {
+      return res.status(500).json({ error: e.message || "Export failed." });
+    }
+  }
+);
+
+r.post(
+  "/api/admin/export/amoe",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_export_amoe", limit: 20, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const { cycleId } = req.body || {};
+      const { state } = await getOrInitAmoeState();
+      const cid = cycleId ? String(cycleId) : String(state.cycleId || 1);
+
+      const entriesSnap = await db().collection("amoeEntries").doc(cid).collection("items").get();
+      const entries = entriesSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+      const winnerSnap = await db()
+        .collection("amoeWinners")
+        .where("cycleId", "==", Number(cid))
+        .orderBy("resolvedAt", "desc")
+        .limit(1)
+        .get();
+
+      const winner = winnerSnap.empty ? null : { id: winnerSnap.docs[0].id, ...winnerSnap.docs[0].data() };
+
+      const payload = {
+        kind: "AMOE_EXPORT",
+        exportedAt: nowMs(),
+        cycleId: Number(cid),
+        state: {
+          cycleId: Number(state.cycleId || 1),
+          status: state.status || "COLLECTING",
+          count: Number(state.count || 0),
+          reachedAt: state.reachedAt ?? null,
+          resolvedAt: state.resolvedAt ?? null,
+          targetNumber: state.targetNumber ?? null,
+          prizeCents: Number(state.prizeCents || AMOE_PRIZE_CENTS),
+          targetCount: AMOE_TARGET_COUNT,
+        },
+        winner,
+        entriesCountTotal: entries.length,
+        entries,
+      };
+
+      await auditLog("admin_export_amoe", { cycleId: Number(cid), entries: entries.length }, req);
+
+      return res.json({ ok: true, payload });
+    } catch (e) {
+      return res.status(500).json({ error: e.message || "AMOE export failed." });
+    }
+  }
+);
+
+export default r;
