@@ -1,8 +1,6 @@
 // src/pages/Admin.jsx
 import React, { useEffect, useMemo, useState } from "react";
 import { apiPost, setAdminToken } from "../lib/api.js";
-import AdminSimPanel from "./admin/AdminSimPanel.jsx";
-
 
 function onlyDigits(s) {
   return String(s ?? "").replace(/[^\d]/g, "");
@@ -342,7 +340,6 @@ export default function Admin() {
   const [resetErr, setResetErr] = useState("");
 
   const active = state?.activeContest || null;
-  const last = state?.lastContest || null;
 
   const totalPaidCents = Number(state?.stats?.totalPaidCents || 0);
 
@@ -750,7 +747,13 @@ export default function Admin() {
           ) : null}
         </div>
 
-        <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} onSubmit={adminLoginSubmit} err={err} busy={loginBusy} />
+        <LoginModal
+          open={loginOpen}
+          onClose={() => setLoginOpen(false)}
+          onSubmit={adminLoginSubmit}
+          err={err}
+          busy={loginBusy}
+        />
       </main>
     );
   }
@@ -812,7 +815,6 @@ export default function Admin() {
         </div>
 
         <div style={twoColStyle}>
-          <AdminSimPanel />
           {/* LEFT: PAID WEEKLY GAME */}
           <section style={panelStyle}>
             <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
@@ -859,7 +861,9 @@ export default function Admin() {
 
                 <div style={compactRow}>
                   <span className="label">Dollar Amount</span>
-                  <span className="value">${Number.isFinite(paidAmountUsd) ? paidAmountUsd.toLocaleString("en-US") : "0"}</span>
+                  <span className="value">
+                    ${Number.isFinite(paidAmountUsd) ? paidAmountUsd.toLocaleString("en-US") : "0"}
+                  </span>
                 </div>
 
                 <div style={compactRow}>
@@ -973,7 +977,8 @@ export default function Admin() {
 
                   {slotLocked(1) ? (
                     <div className="miniMuted" style={{ textAlign: "center" }}>
-                      {slotInfo(1)?.drawLabel || "—"} · {slotInfo(1)?.target || "—"} • {formatTS(slotInfo(1)?.playedAt || null)}
+                      {slotInfo(1)?.drawLabel || "—"} · {slotInfo(1)?.target || "—"} •{" "}
+                      {formatTS(slotInfo(1)?.playedAt || null)}
                     </div>
                   ) : null}
                 </div>
@@ -1005,7 +1010,8 @@ export default function Admin() {
 
                   {slotLocked(2) ? (
                     <div className="miniMuted" style={{ textAlign: "center" }}>
-                      {slotInfo(2)?.drawLabel || "—"} · {slotInfo(2)?.target || "—"} • {formatTS(slotInfo(2)?.playedAt || null)}
+                      {slotInfo(2)?.drawLabel || "—"} · {slotInfo(2)?.target || "—"} •{" "}
+                      {formatTS(slotInfo(2)?.playedAt || null)}
                     </div>
                   ) : null}
                 </div>
@@ -1037,7 +1043,8 @@ export default function Admin() {
 
                   {slotLocked(3) ? (
                     <div className="miniMuted" style={{ textAlign: "center" }}>
-                      {slotInfo(3)?.drawLabel || "—"} · {slotInfo(3)?.target || "—"} • {formatTS(slotInfo(3)?.playedAt || null)}
+                      {slotInfo(3)?.drawLabel || "—"} · {slotInfo(3)?.target || "—"} •{" "}
+                      {formatTS(slotInfo(3)?.playedAt || null)}
                     </div>
                   ) : null}
                 </div>
@@ -1069,7 +1076,8 @@ export default function Admin() {
 
                   {slotLocked(4) ? (
                     <div className="miniMuted" style={{ textAlign: "center" }}>
-                      {slotInfo(4)?.drawLabel || "—"} · {slotInfo(4)?.target || "—"} • {formatTS(slotInfo(4)?.playedAt || null)}
+                      {slotInfo(4)?.drawLabel || "—"} · {slotInfo(4)?.target || "—"} •{" "}
+                      {formatTS(slotInfo(4)?.playedAt || null)}
                     </div>
                   ) : null}
                 </div>
@@ -1161,7 +1169,11 @@ export default function Admin() {
                       }}
                     />
 
-                    <button className="secondary" onClick={totalPaidAdd} disabled={busy || totalPaidBusy || dollarsToCents(addPaidRaw) == null}>
+                    <button
+                      className="secondary"
+                      onClick={totalPaidAdd}
+                      disabled={busy || totalPaidBusy || dollarsToCents(addPaidRaw) == null}
+                    >
                       {totalPaidBusy ? "Updating…" : "Add to Total Paid Out"}
                     </button>
 
@@ -1218,7 +1230,11 @@ export default function Admin() {
                     }}
                   />
 
-                  <button className="secondary" onClick={lookupUser} disabled={busy || lookupBusy || !String(lookupUN || "").trim()}>
+                  <button
+                    className="secondary"
+                    onClick={lookupUser}
+                    disabled={busy || lookupBusy || !String(lookupUN || "").trim()}
+                  >
                     {lookupBusy ? "Searching…" : "Search"}
                   </button>
 
@@ -1274,9 +1290,27 @@ export default function Admin() {
                   Add AMOE Entry (Manual)
                 </div>
 
-                <input className="field" placeholder="Full legal name" value={amoeName} onChange={(e) => setAmoeName(e.target.value)} disabled={busy} />
-                <input className="field" placeholder="Email" value={amoeEmail} onChange={(e) => setAmoeEmail(e.target.value)} disabled={busy} />
-                <input className="field" placeholder="Mailing address" value={amoeAddress} onChange={(e) => setAmoeAddress(e.target.value)} disabled={busy} />
+                <input
+                  className="field"
+                  placeholder="Full legal name"
+                  value={amoeName}
+                  onChange={(e) => setAmoeName(e.target.value)}
+                  disabled={busy}
+                />
+                <input
+                  className="field"
+                  placeholder="Email"
+                  value={amoeEmail}
+                  onChange={(e) => setAmoeEmail(e.target.value)}
+                  disabled={busy}
+                />
+                <input
+                  className="field"
+                  placeholder="Mailing address"
+                  value={amoeAddress}
+                  onChange={(e) => setAmoeAddress(e.target.value)}
+                  disabled={busy}
+                />
                 <input
                   className="field"
                   type="text"

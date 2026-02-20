@@ -19,7 +19,7 @@ const r = Router();
  * Claim definition:
  * - A number is "claimed" if there exists ANY OTHER entry in the same contest
  *   with the same normalized guess AND countedInContest === true.
- *   (Your AMOE mirror entries set countedInContest=true, and paid confirms set it true too.)
+ *   (AMOE mirror entries set countedInContest=true, and paid confirms set it true too.)
  *
  * If Stripe is paid but the number was already claimed by someone else:
  * - We DO NOT increment contest entryCount
@@ -46,16 +46,13 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
       });
     }
 
-    // Metadata must identify which entry to mark paid
+    // Metadata must identify which contest this is for
     const contestId = String(session.metadata?.contestId || "").trim();
-    const entryIdFromMeta =
-      String(session.metadata?.entryId || "").trim() ||
-      String(session.metadata?.userId || "").trim();
 
     // Only allow confirming YOUR OWN entry (requireUser)
     const userId = String(req.user?.id || "").trim();
     const finalContestId = contestId;
-    const finalEntryId = entryIdFromMeta || userId;
+    const finalEntryId = userId;
 
     if (!finalContestId) {
       return res.status(400).json({
@@ -64,12 +61,8 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
       });
     }
 
-    // Security: never let user confirm someone else's entry doc
-    if (!userId || finalEntryId !== userId) {
-      return res.status(403).json({
-        ok: false,
-        error: "Forbidden.",
-      });
+    if (!userId) {
+      return res.status(401).json({ ok: false, error: "Unauthorized." });
     }
 
     const entryRef = db()
@@ -110,36 +103,29 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
       if (contest.resolved) {
         queued = true;
 
-        if (!alreadyPaid) {
-          tx.update(entryRef, {
-            paid: true,
-            paidAt: nowMs(),
-            status: "QUEUED",
-            stripeSessionId: session.id || null,
-            paymentIntentId: paymentIntentId || null,
-            lastTouchedAt: nowMs(),
-            // normalize guess defensively
-            guess: guessNorm,
-          });
-          changed = true;
-        } else {
-          const curStatus = String(entry.status || "").toUpperCase();
-          tx.update(entryRef, {
-            status: curStatus === "QUEUED" ? entry.status : "QUEUED",
-            stripeSessionId: session.id || entry.stripeSessionId || null,
-            paymentIntentId: paymentIntentId || entry.paymentIntentId || null,
-            lastTouchedAt: nowMs(),
-            guess: guessNorm,
-          });
-        }
+        // Mark paid (idempotent), but keep this out of the contest count
+        tx.update(entryRef, {
+          paid: true,
+          paidAt: alreadyPaid ? entry.paidAt ?? nowMs() : nowMs(),
+          status: "QUEUED",
+          countedInContest: alreadyCounted ? true : false,
+          countedAt: alreadyCounted ? entry.countedAt ?? null : null,
+
+          stripeSessionId: session.id || entry.stripeSessionId || null,
+          paymentIntentId: paymentIntentId || entry.paymentIntentId || null,
+          lastTouchedAt: nowMs(),
+
+          // normalize guess defensively
+          guess: guessNorm,
+        });
+
+        changed = true;
         return;
       }
 
       // Uniqueness enforcement ONLY when we would newly count this entry.
       // If this entry is already counted, let confirm be idempotent.
       if (!alreadyCounted) {
-        // Find any OTHER entry in this contest that already "claims" this number.
-        // Claimed = countedInContest === true (covers PAID confirmed + AMOE inserted)
         const q = entriesCol
           .where("guess", "==", guessNorm)
           .where("countedInContest", "==", true)
@@ -170,7 +156,7 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
               paymentIntentId: paymentIntentId || entry.paymentIntentId || null,
               lastTouchedAt: nowMs(),
 
-              // keep guess normalized in case older docs stored weirdly
+              // keep guess normalized
               guess: guessNorm,
             });
 
@@ -180,7 +166,7 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
         }
       }
 
-      // Mark entry paid (idempotent)
+      // Mark entry paid (idempotent) and normalize guess
       if (!alreadyPaid) {
         tx.update(entryRef, {
           paid: true,
@@ -189,16 +175,20 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
           stripeSessionId: session.id || null,
           paymentIntentId: paymentIntentId || null,
           lastTouchedAt: nowMs(),
-          // keep guess normalized in case older docs stored weirdly
           guess: guessNorm,
         });
         changed = true;
       } else {
+        // keep it clean/idempotent, and ensure status isn't left weird if it's counted
+        const curStatus = String(entry.status || "").toUpperCase();
+        const statusPatch = alreadyCounted && curStatus !== "PAID" ? { status: "PAID" } : {};
+
         tx.update(entryRef, {
           stripeSessionId: session.id || entry.stripeSessionId || null,
           paymentIntentId: paymentIntentId || entry.paymentIntentId || null,
           lastTouchedAt: nowMs(),
           guess: guessNorm,
+          ...statusPatch,
         });
       }
 
@@ -208,9 +198,11 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
           entryCount: admin.firestore.FieldValue.increment(1),
         });
 
+        // IMPORTANT: when we count it, it is officially claimed
         tx.update(entryRef, {
           countedInContest: true,
           countedAt: nowMs(),
+          status: "PAID",
         });
 
         appliedContestIncrement = true;

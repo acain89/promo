@@ -14,22 +14,31 @@ import { nowMs } from "./utils.js";
    TIME HELPERS (CHICAGO OFFICIAL TIME)
 ========================================================= */
 
+// Cache formatter (big perf win vs recreating per call)
+const CHICAGO_DTF = new Intl.DateTimeFormat("en-US", {
+  timeZone: CHICAGO_TZ,
+  weekday: "short",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+
+function normalizeChicagoParts(out) {
+  // Some environments can emit "24" for midnight with hour12:false.
+  // Normalize to "00" so numeric comparisons behave.
+  if (out && out.hour === "24") out.hour = "00";
+  return out;
+}
+
 export function chicagoParts(ms) {
-  const dtf = new Intl.DateTimeFormat("en-US", {
-    timeZone: CHICAGO_TZ,
-    weekday: "short",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
-  const parts = dtf.formatToParts(new Date(ms));
+  const parts = CHICAGO_DTF.formatToParts(new Date(ms));
   const out = {};
   for (const p of parts) out[p.type] = p.value;
-  return out;
+  return normalizeChicagoParts(out);
 }
 
 export function mmddyyyyFromCutoffMs(cutoffMs) {
@@ -116,7 +125,7 @@ function clampInt(n, lo, hi) {
 async function getWeeklyPrizeDefaults() {
   try {
     const snap = await db().collection("config").doc("public").get();
-    const d = snap.exists ? (snap.data() || {}) : {};
+    const d = snap.exists ? snap.data() || {} : {};
 
     const g = clampInt(d.weeklyGuaranteedPrizeCents, 0, PRIZE_MAX_CENTS);
     const b = clampInt(d.weeklyBonusPrizeCents, 0, PRIZE_MAX_CENTS);
@@ -269,16 +278,19 @@ export async function getContestForEntryTime(entryMs) {
   const cutoffAt = cutoffForEntryMs(entryMs);
   const contest = await ensureContestForCutoff(cutoffAt);
 
-  await db().collection("contest").doc("current").set(
-    {
-      contestId: contest.id,
-      cutoffAt: contest.cutoffAt,
-      endsOn: contest.endsOn,
-      mode: contest.mode || "DAILY4",
-      updatedAt: nowMs(),
-    },
-    { merge: true }
-  );
+  await db()
+    .collection("contest")
+    .doc("current")
+    .set(
+      {
+        contestId: contest.id,
+        cutoffAt: contest.cutoffAt,
+        endsOn: contest.endsOn,
+        mode: contest.mode || "DAILY4",
+        updatedAt: nowMs(),
+      },
+      { merge: true }
+    );
 
   return contest;
 }
