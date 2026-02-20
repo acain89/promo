@@ -156,13 +156,13 @@ export async function ensureContestForCutoff(cutoffAtMs) {
       resolvedAt: null,
 
       // end semantics (4-target flow)
-      resolvedBy: null,      // "EXACT" | "CLOSEST"
-      resolvedSlot: null,    // 1..4
-      winner: null,          // snapshot winner for Reveal
+      resolvedBy: null, // "EXACT" | "CLOSEST"
+      resolvedSlot: null, // 1..4
+      winner: null, // snapshot winner for Reveal
       projectedWinner: null, // running best
 
       // targets state
-      targets: {},           // { "1": {...}, "2": {...}, "3": {...}, "4": {...} }
+      targets: {}, // { "1": {...}, "2": {...}, "3": {...}, "4": {...} }
       targetsUpdatedAt: null,
 
       // legacy compatibility
@@ -202,31 +202,67 @@ export async function ensureContestForCutoff(cutoffAtMs) {
   return snap.data();
 }
 
+/**
+ * ✅ Active contest selection:
+ * - Use the most-recent cutoff's contest while it is NOT resolved (this is the current live cycle).
+ * - Only switch to the next cutoff's contest once the last one is resolved.
+ *
+ * This prevents "drifting" into a future contest and fixes "Contest unavailable" during a live cycle.
+ */
 export async function ensureActiveContestNow() {
-  const cutoffAt = cutoffForEntryMs(nowMs());
-  const contest = await ensureContestForCutoff(cutoffAt);
+  const now = nowMs();
 
-  // NOTE: "contest/current" is fine as a pointer doc if you use it elsewhere.
-  await db().collection("contest").doc("current").set(
-    {
-      contestId: contest.id,
-      cutoffAt: contest.cutoffAt,
-      endsOn: contest.endsOn,
-      mode: contest.mode || "DAILY4",
-      updatedAt: nowMs(),
-    },
-    { merge: true }
-  );
+  // 1) Prefer the most-recent cutoff contest (current cycle) if it's not resolved
+  const lastCutoff = mostRecentChicagoCutoffAtOrBefore(now);
+  const lastContest = await ensureContestForCutoff(lastCutoff);
 
-  const ref = db().collection("contests").doc(contest.id);
+  if (lastContest && !lastContest.resolved) {
+    await db()
+      .collection("contest")
+      .doc("current")
+      .set(
+        {
+          contestId: lastContest.id,
+          cutoffAt: lastContest.cutoffAt,
+          endsOn: lastContest.endsOn,
+          mode: lastContest.mode || "DAILY4",
+          updatedAt: now,
+        },
+        { merge: true }
+      );
 
-  if (!contest.activatedAt) {
-    const t = nowMs();
-    await ref.set({ activatedAt: t }, { merge: true });
-    return { ...contest, activatedAt: t };
+    if (!lastContest.activatedAt) {
+      await db().collection("contests").doc(lastContest.id).set({ activatedAt: now }, { merge: true });
+      return { ...lastContest, activatedAt: now };
+    }
+
+    return lastContest;
   }
 
-  return contest;
+  // 2) Otherwise, move to the next cutoff contest
+  const nextCutoff = nextChicagoCutoffAfter(now);
+  const nextContest = await ensureContestForCutoff(nextCutoff);
+
+  await db()
+    .collection("contest")
+    .doc("current")
+    .set(
+      {
+        contestId: nextContest.id,
+        cutoffAt: nextContest.cutoffAt,
+        endsOn: nextContest.endsOn,
+        mode: nextContest.mode || "DAILY4",
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+  if (!nextContest.activatedAt) {
+    await db().collection("contests").doc(nextContest.id).set({ activatedAt: now }, { merge: true });
+    return { ...nextContest, activatedAt: now };
+  }
+
+  return nextContest;
 }
 
 export async function getContestForEntryTime(entryMs) {

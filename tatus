@@ -1,0 +1,60 @@
+[35mbackend/routes/admin.js[m[36m:[m[32m866[m[36m:[m   ✅ SIM FEATURE REMOVED: no [1;31msim[m-only wipe route remains
+[35mbackend/routes/adminSim.js[m[36m:[m[32m26[m[36m:[m// Safety caps for "[1;31msim[mulate checkout"
+[35mbackend/routes/adminSim.js[m[36m:[m[32m159[m[36m:[m * - If [1;31msim[mOnly=true: only trims [1;31msim[m winners and never touches real winners.
+[35mbackend/routes/adminSim.js[m[36m:[m[32m160[m[36m:[m * - If [1;31msim[mOnly=false: trims overall winners collection.
+[35mbackend/routes/adminSim.js[m[36m:[m[32m162[m[36m:[masync function trimWinnersHistory({ [1;31msim[mOnly = false } = {}) {
+[35mbackend/routes/adminSim.js[m[36m:[m[32m174[m[36m:[m    const isSim = data.[1;31msim[m === true;
+[35mbackend/routes/adminSim.js[m[36m:[m[32m176[m[36m:[m    if ([1;31msim[mOnly) {
+[35mbackend/routes/adminSim.js[m[36m:[m[32m202[m[36m:[m * This makes repeat [1;31msim[mulations easier to reason about and prevents accidental duplicates.
+[35mbackend/routes/adminSim.js[m[36m:[m[32m248[m[36m:[m * This is fine for [1;31msim[mulation; do not use for real production flows.
+[35mbackend/routes/adminSim.js[m[36m:[m[32m329[m[36m:[m * Resets only the fields [1;31msim[mulation touches. (Does not clobber prize config.)
+[35mbackend/routes/adminSim.js[m[36m:[m[32m348[m[36m:[m      [1;31msim[mLastError: null,
+[35mbackend/routes/adminSim.js[m[36m:[m[32m359[m[36m:[m * - Writes a winner record ([1;31msim[m: true) if projectedWinner exists
+[35mbackend/routes/adminSim.js[m[36m:[m[32m457[m[36m:[m        resolvedSlot: 4, // because [1;31msim[m ran all 4 without exact
+[35mbackend/routes/adminSim.js[m[36m:[m[32m524[m[36m:[m      [1;31msim[m: true,
+[35mbackend/routes/adminSim.js[m[36m:[m[32m543[m[36m:[m  "/api/admin/[1;31msim[mulate-cycle",
+[35mbackend/routes/adminSim.js[m[36m:[m[32m545[m[36m:[m  rateLimit({ routeKey: "admin_[1;31msim[mulate_cycle", limit: 8, windowMs: 15 * 60 * 1000 }),
+[35mbackend/routes/adminSim.js[m[36m:[m[32m601[m[36m:[m          _docId: `[1;31msim[m_${contestId}_${now}_${i}_${Math.random().toString(16).slice(2)}`,
+[35mbackend/routes/adminSim.js[m[36m:[m[32m614[m[36m:[m          [1;31msim[m: true,
+[35mbackend/routes/adminSim.js[m[36m:[m[32m615[m[36m:[m          [1;31msim[mRunAt: now,
+[35mbackend/routes/adminSim.js[m[36m:[m[32m663[m[36m:[m          [1;31msim[mLastRunAt: nowMs(),
+[35mbackend/routes/adminSim.js[m[36m:[m[32m664[m[36m:[m          [1;31msim[mLastRunCount: created,
+[35mbackend/routes/adminSim.js[m[36m:[m[32m665[m[36m:[m          [1;31msim[mLastRunEligibleCount: counts.eligibleCount,
+[35mbackend/routes/adminSim.js[m[36m:[m[32m666[m[36m:[m          [1;31msim[mLastRunTotalEntries: counts.totalEntries,
+[35mbackend/routes/adminSim.js[m[36m:[m[32m667[m[36m:[m          [1;31msim[mLastRunType: "seed",
+[35mbackend/routes/adminSim.js[m[36m:[m[32m668[m[36m:[m          [1;31msim[mLastError: null,
+[35mbackend/routes/adminSim.js[m[36m:[m[32m688[m[36m:[m        await auditLog("admin_[1;31msim[mulate_cycle_seed_only", { contestId, created, eligibleCount: counts.eligibleCount }, req);
+[35mbackend/routes/adminSim.js[m[36m:[m[32m693[m[36m:[m      await trimWinnersHistory({ [1;31msim[mOnly: true });
+[35mbackend/routes/adminSim.js[m[36m:[m[32m697[m[36m:[m          [1;31msim[mLastRunAt: nowMs(),
+[35mbackend/routes/adminSim.js[m[36m:[m[32m698[m[36m:[m          [1;31msim[mLastRunCount: created,
+[35mbackend/routes/adminSim.js[m[36m:[m[32m699[m[36m:[m          [1;31msim[mLastRunType: "seed+resolve",
+[35mbackend/routes/adminSim.js[m[36m:[m[32m704[m[36m:[m      await auditLog("admin_[1;31msim[mulate_cycle", { contestId, created, winnerUN: winner?.winnerUN || null }, req);
+[35mbackend/routes/adminSim.js[m[36m:[m[32m718[m[36m:[m            { [1;31msim[mLastError: String(e?.message || e), [1;31msim[mLastErrorAt: nowMs() },
+[35mbackend/routes/adminSim.js[m[36m:[m[32m736[m[36m:[m   NOTE: This does NOT call Stripe; it [1;31msim[mulates state transitions in Firestore.
+[35mbackend/routes/adminSim.js[m[36m:[m[32m740[m[36m:[m  "/api/admin/[1;31msim[mulate-checkout",
+[35mbackend/routes/adminSim.js[m[36m:[m[32m742[m[36m:[m  rateLimit({ routeKey: "admin_[1;31msim[mulate_checkout", limit: 12, windowMs: 15 * 60 * 1000 }),
+[35mbackend/routes/adminSim.js[m[36m:[m[32m783[m[36m:[m          const docId = `[1;31msim[mq_${contestId}_${now}_${i}_${Math.random().toString(16).slice(2)}`;
+[35mbackend/routes/adminSim.js[m[36m:[m[32m799[m[36m:[m            [1;31msim[m: true,
+[35mbackend/routes/adminSim.js[m[36m:[m[32m800[m[36m:[m            [1;31msim[mRunAt: now,
+[35mbackend/routes/adminSim.js[m[36m:[m[32m810[m[36m:[m      const snap = await col.where("[1;31msim[m", "==", true).orderBy("createdAt", "desc").limit(10_000).get();
+[35mbackend/routes/adminSim.js[m[36m:[m[32m832[m[36m:[m            // stripeSessionId: "[1;31msim[m_...",
+[35mbackend/routes/adminSim.js[m[36m:[m[32m833[m[36m:[m            // paymentIntentId: "[1;31msim[m_...",
+[35mbackend/routes/adminSim.js[m[36m:[m[32m834[m[36m:[m            [1;31msim[mPaid: true,
+[35mbackend/routes/adminSim.js[m[36m:[m[32m851[m[36m:[m              [1;31msim[mAlreadyPaidConfirm: true,
+[35mbackend/routes/adminSim.js[m[36m:[m[32m864[m[36m:[m          [1;31msim[mLastCheckoutRunAt: nowMs(),
+[35mbackend/routes/adminSim.js[m[36m:[m[32m865[m[36m:[m          [1;31msim[mLastCheckout: {
+[35mbackend/routes/adminSim.js[m[36m:[m[32m879[m[36m:[m        "admin_[1;31msim[mulate_checkout",
+[35mbackend/routes/adminSim.js[m[36m:[m[32m904[m[36m:[m   - Deletes ONLY [1;31msim[m:true docs from the active contest pool
+[35mbackend/routes/adminSim.js[m[36m:[m[32m909[m[36m:[m  "/api/admin/[1;31msim[m/cleanup",
+[35mbackend/routes/adminSim.js[m[36m:[m[32m911[m[36m:[m  rateLimit({ routeKey: "admin_[1;31msim[m_cleanup", limit: 12, windowMs: 15 * 60 * 1000 }),
+[35mbackend/routes/adminSim.js[m[36m:[m[32m920[m[36m:[m      // delete [1;31msim[m:true docs in batches
+[35mbackend/routes/adminSim.js[m[36m:[m[32m923[m[36m:[m        const snap = await col.where("[1;31msim[m", "==", true).limit(MAX_BATCH_DELETE).get();
+[35mbackend/routes/adminSim.js[m[36m:[m[32m939[m[36m:[m          [1;31msim[mCleanupAt: nowMs(),
+[35mbackend/routes/adminSim.js[m[36m:[m[32m940[m[36m:[m          [1;31msim[mCleanupDeleted: deleted,
+[35mbackend/routes/adminSim.js[m[36m:[m[32m941[m[36m:[m          [1;31msim[mCleanupEligibleCount: counts.eligibleCount,
+[35mbackend/routes/adminSim.js[m[36m:[m[32m942[m[36m:[m          [1;31msim[mCleanupTotalEntries: counts.totalEntries,
+[35mbackend/routes/adminSim.js[m[36m:[m[32m947[m[36m:[m      await auditLog("admin_[1;31msim[m_cleanup", { contestId, deleted, entryCount: counts.eligibleCount }, req);
+[35mbackend/routes/auth.js[m[36m:[m[32m32[m[36m:[m  // [1;31msim[mple + safe: 2–24 chars, letters/numbers/_ only
+[35mbackend/routes/checkout.js[m[36m:[m[32m33[m[36m:[m * Keep it [1;31msim[mple: alphanum + spaces, 5–22 chars, must contain at least one letter.
+[35msrc/pages/Terms.jsx[m[36m:[m[32m283[m[36m:[m          Stripe (or a [1;31msim[milar payment processor) may be used solely to process payments for paid entries. Sponsor does
+[35msrc/pages/admin/AdminSimPanel.jsx[m[36m:[m[32m37[m[36m:[m      const res = await apiPost("/api/admin/[1;31msim[mulate-cycle", payload, { admin: true });

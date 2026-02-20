@@ -71,8 +71,9 @@ function makeHeaders(extra = {}, includeAdminToken = true) {
   if (!h.Accept && !h.accept) h.Accept = "application/json";
 
   // Force no-cache headers (client-side request)
-  if (!h["Cache-Control"] && !h["cache-control"])
+  if (!h["Cache-Control"] && !h["cache-control"]) {
     h["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0";
+  }
   if (!h.Pragma && !h.pragma) h.Pragma = "no-cache";
   if (!h.Expires && !h.expires) h.Expires = "0";
 
@@ -96,7 +97,10 @@ async function request(method, path, body, opts = {}) {
   let url = buildUrl(path);
 
   // Cache-bust GETs so landing/reveal always show fresh timer/pool counts.
-  if (String(method).toUpperCase() === "GET") {
+  // Allow opt-out per-request via { cacheBust: false }.
+  const isGet = String(method).toUpperCase() === "GET";
+  const doBust = opts.cacheBust !== false;
+  if (isGet && doBust) {
     url = withCacheBust(url);
   }
 

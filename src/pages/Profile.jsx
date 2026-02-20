@@ -258,12 +258,7 @@ function isLockedEntry(entry) {
   // - "QUEUED" means paid after contest resolved → also don’t “lock” the picker forever.
   if (s === "DUPLICATE" || s === "QUEUED") return false;
 
-  return (
-    paid ||
-    s === "PAID" ||
-    s === "PAID_LOCKED" ||
-    s === "LOCKED_PAID"
-  );
+  return paid || s === "PAID" || s === "PAID_LOCKED" || s === "LOCKED_PAID";
 }
 
 export default function Profile() {
@@ -286,7 +281,7 @@ export default function Profile() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const lockBtnRef = useRef(null);
 
-  // Availability UI state (paid-only OR AMOE already entered claims it)
+  // Availability UI state
   const [availLoading, setAvailLoading] = useState(false);
   const [available, setAvailable] = useState(null); // null | true | false
 
@@ -332,9 +327,9 @@ export default function Profile() {
 
   const guessDigitsLen = useMemo(() => onlyDigits(guessRaw).length, [guessRaw]);
 
-  // Paid-only rule: user can proceed only if guess has 4 digits and is not known to be unavailable
+  // ✅ Checkout MUST be disabled unless availability explicitly returns true.
   const canProceedBase = !loading && !busy && !locked && !!cutoffAt && guessDigitsLen === DIGITS;
-  const canProceed = canProceedBase && available !== false;
+  const canProceed = canProceedBase && available === true;
 
   async function refresh({ silent = false } = {}) {
     if (!silent) {
@@ -422,17 +417,15 @@ export default function Profile() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Debounced availability check (paid-only + AMOE claims)
+  // Debounced availability check
   const availReqIdRef = useRef(0);
   useEffect(() => {
-    // Only show availability for editable entry
     if (loading || busy || locked || !cutoffAt) {
       setAvailLoading(false);
       setAvailable(null);
       return;
     }
 
-    // Only check when user has entered 4 digits
     if (guessDigitsLen !== DIGITS) {
       setAvailLoading(false);
       setAvailable(null);
@@ -447,25 +440,61 @@ export default function Profile() {
 
     const t = setTimeout(async () => {
       try {
-        const r = await apiGet(`/api/guess-availability?guess=${encodeURIComponent(g)}`);
+        // ✅ Include required params (guess + digits) and optional contestId
+        // ✅ Backend route that actually exists (your screenshot shows 404 on /guess-available)
+const qs = new URLSearchParams();
+
+// Send multiple common keys so we match backend expectations without breaking anything
+qs.set("guess", g);
+qs.set("num", g);
+qs.set("value", g);
+
+qs.set("digits", String(DIGITS));
+
+// Contest identifiers: send both id-style and cutoff-style
+const contestId =
+  contest?.id ?? contest?.contestId ?? contest?._id ?? contest?.contest ?? null;
+if (contestId) {
+  qs.set("contestId", String(contestId));
+  qs.set("contest", String(contestId));
+}
+
+// Cutoff timestamps (very commonly used server-side to locate the current contest)
+if (cutoffAt) {
+  qs.set("cutoffAt", String(cutoffAt));
+  qs.set("cutoffAtMs", String(cutoffAt));
+  qs.set("endsOnMs", String(cutoffAt));
+}
+
+const digitsOnly = onlyDigits(guessRaw).slice(0, DIGITS);
+if (digitsOnly.length !== DIGITS) return;
+
+// ✅ Call WITHOUT cache-bust (__ts) and without extra params
+const r = await apiGet(
+  `/api/guess-availability?guess=${encodeURIComponent(digitsOnly)}`,
+  { cacheBust: false }
+);
+
+
         if (reqId !== availReqIdRef.current) return;
 
+        // ✅ Any failure -> treat as NOT available (so checkout stays disabled)
         if (!r || r.ok === false) {
-          setAvailable(null);
+          setAvailable(false);
           return;
         }
 
         setAvailable(r.available === true);
       } catch {
         if (reqId !== availReqIdRef.current) return;
-        setAvailable(null);
+        setAvailable(false);
       } finally {
         if (reqId === availReqIdRef.current) setAvailLoading(false);
       }
     }, 320);
 
     return () => clearTimeout(t);
-  }, [guessRaw, guessDigitsLen, DIGITS, loading, busy, locked, cutoffAt]);
+  }, [guessRaw, guessDigitsLen, DIGITS, loading, busy, locked, cutoffAt, contest]);
 
   function availabilityBadge() {
     if (locked) return null;
@@ -513,25 +542,17 @@ export default function Profile() {
       );
     }
 
-    if (available === false) {
-      return (
-        <div
-          style={{
-            ...baseStyle,
-            border: "1px solid rgba(255,120,120,0.28)",
-            background: "rgba(255,120,120,0.06)",
-          }}
-          aria-label="Number not available"
-        >
-          <span style={{ fontWeight: 950 }}>✕ Not Available</span>
-        </div>
-      );
-    }
-
-    // unknown
+    // ✅ Treat unknown/failure as Not Available (no third state)
     return (
-      <div style={baseStyle} aria-label="Availability unknown">
-        <span className="miniMuted">Availability unavailable</span>
+      <div
+        style={{
+          ...baseStyle,
+          border: "1px solid rgba(255,120,120,0.28)",
+          background: "rgba(255,120,120,0.06)",
+        }}
+        aria-label="Number not available"
+      >
+        <span style={{ fontWeight: 950 }}>✕ Not Available</span>
       </div>
     );
   }
@@ -552,7 +573,7 @@ export default function Profile() {
       const clean = padGuess(useExistingGuess ? myEntry?.guess ?? guessRaw : guessRaw, DIGITS);
       if (onlyDigits(clean).length !== DIGITS) throw new Error(`Enter a ${DIGITS}-digit number.`);
 
-      if (available === false) throw new Error("That number is already claimed. Please pick another.");
+      if (available !== true) throw new Error("That number is not available. Please pick another.");
 
       const r = await apiPost("/api/checkout", { guess: clean });
       if (!r?.url) throw new Error("Checkout not available.");
@@ -766,7 +787,6 @@ export default function Profile() {
                     <DigitBox
                       value={onlyDigits(guessRaw).slice(0, DIGITS)}
                       onChange={(v) => {
-                        // If they start editing after a DUPLICATE/QUEUED message, clear it.
                         if (duplicatePaid || queuedPaid) setErr("");
                         setGuessRaw(v);
                       }}
@@ -790,8 +810,8 @@ export default function Profile() {
                             setStatus("Payments are not enabled yet on this build.");
                             return;
                           }
-                          if (available === false) {
-                            setErr("That number is already claimed. Please pick another.");
+                          if (available !== true) {
+                            setErr("That number is not available. Please pick another.");
                             return;
                           }
                           setConfirmOpen(true);
@@ -805,12 +825,7 @@ export default function Profile() {
 
                 {locked ? (
                   <>
-                    <DigitBox
-                      value={String(myEntry?.guess || "")}
-                      onChange={() => {}}
-                      disabled
-                      digits={DIGITS}
-                    />
+                    <DigitBox value={String(myEntry?.guess || "")} onChange={() => {}} disabled digits={DIGITS} />
 
                     <div style={{ display: "grid", gap: 8, marginTop: 10, textAlign: "left" }}>
                       <div style={{ display: "flex", justifyContent: "space-between" }}>
@@ -858,13 +873,13 @@ export default function Profile() {
         }
       >
         <div className="miniMuted" style={{ marginBottom: 10 }}>
-          You are about to proceed to payment for <strong>{guess.padStart(DIGITS, "0")}</strong>. Your entry
-          is recorded <strong>only after payment is confirmed</strong>.
+          You are about to proceed to payment for <strong>{guess.padStart(DIGITS, "0")}</strong>. Your entry is
+          recorded <strong>only after payment is confirmed</strong>.
         </div>
 
-        {guessDigitsLen === DIGITS && available === false ? (
+        {guessDigitsLen === DIGITS && available !== true ? (
           <div className="miniMuted" style={{ marginBottom: 10 }}>
-            <strong>That number is already claimed.</strong> Please pick another.
+            <strong>That number is not available.</strong> Please pick another.
           </div>
         ) : null}
 
