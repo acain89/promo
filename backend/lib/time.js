@@ -63,8 +63,8 @@ function msFromParts(days, hours, minutes) {
    DEFAULT SCHEDULE
    - Close: Saturday 9:00 AM (cutoffAt)
    - Reopen: Saturday 10:30 PM (startMs)
-   - So each contest "registration open" window is:
-       startMs = cutoffAt - 6 days 10 hours 30 minutes
+   - Window is:
+       startMs = cutoffAt - 6d 10h 30m
        endMs   = cutoffAt
 ========================================================= */
 
@@ -80,7 +80,6 @@ function defaultEndMsFromCutoff(cutoffAtMs) {
 
 /* =========================================================
    CUTOFF LOGIC
-   NOTE: Make weekday matching resilient to config casing/format.
 ========================================================= */
 
 function normWeekdayShort(x) {
@@ -148,10 +147,13 @@ export function getRegistrationWindow(contest) {
   const cutoffAt = Number(contest.cutoffAt || 0);
   if (!Number.isFinite(cutoffAt) || cutoffAt <= 0) return { startMs: null, endMs: null, source: "none" };
 
+  // IMPORTANT:
+  // If startMs/endMs were explicitly written on the contest doc (admin override),
+  // use those directly. Otherwise use defaults derived from cutoff.
   const startMs = Number(contest.startMs || 0) || defaultStartMsFromCutoff(cutoffAt);
   const endMs = Number(contest.endMs || 0) || defaultEndMsFromCutoff(cutoffAt);
 
-  return { startMs, endMs, source: "default" };
+  return { startMs, endMs, source: contest.startMs || contest.endMs ? "explicit" : "default" };
 }
 
 export function isRegistrationOpenAt(contest, atMs) {
@@ -165,12 +167,6 @@ export function isRegistrationOpenAt(contest, atMs) {
   return t >= startMs && t < endMs;
 }
 
-/**
- * Update (or clear) manual window override on a contest.
- * Use this in your admin route:
- * - enable override: setManualRegistrationWindow(contestId, startMs, endMs, true)
- * - disable override: setManualRegistrationWindow(contestId, null, null, false)
- */
 export async function setManualRegistrationWindow(contestId, startMs, endMs, enabled) {
   const id = String(contestId || "").trim();
   if (!id) throw new Error("Missing contestId.");
@@ -212,7 +208,6 @@ export async function setManualRegistrationWindow(contestId, startMs, endMs, ena
 
 /* =========================================================
    PUBLIC PRIZE CONFIG (config/public)
-   - Admin can set weeklyGuaranteedPrizeCents + weeklyBonusPrizeCents
 ========================================================= */
 
 const PRIZE_MAX_CENTS = 1_000_000_00; // safety
@@ -267,7 +262,7 @@ export async function ensureContestForCutoff(cutoffAtMs) {
       cutoffAt: cutoffAtMs,
       endsOn,
 
-      // ✅ registration window defaults (Sat 10:30pm reopen → Sat 9:00am close)
+      // defaults
       startMs: defaultStartMs,
       endMs: defaultEndMs,
 
@@ -280,17 +275,14 @@ export async function ensureContestForCutoff(cutoffAtMs) {
       resolved: false,
       resolvedAt: null,
 
-      // end semantics (4-target flow)
-      resolvedBy: null, // "EXACT" | "CLOSEST"
-      resolvedSlot: null, // 1..4
-      winner: null, // snapshot winner for Reveal
-      projectedWinner: null, // running best
+      resolvedBy: null,
+      resolvedSlot: null,
+      winner: null,
+      projectedWinner: null,
 
-      // targets state
-      targets: {}, // { "1": {...}, "2": {...}, "3": {...}, "4": {...} }
+      targets: {},
       targetsUpdatedAt: null,
 
-      // legacy compatibility
       targetNumber: null,
 
       entryCount: 0,
@@ -301,7 +293,6 @@ export async function ensureContestForCutoff(cutoffAtMs) {
 
       prizeUpdatedAt: nowMs(),
 
-      // legacy / unused fields (kept if older clients expect them)
       drawResults: [],
       winnerId: null,
 
@@ -326,7 +317,7 @@ export async function ensureContestForCutoff(cutoffAtMs) {
     };
   }
 
-  // If contest exists, ensure startMs/endMs are present (do not overwrite manual overrides)
+  // If contest exists, ensure startMs/endMs are present (do not overwrite explicit admin changes)
   const existing = snap.data() || {};
   const patch = {};
   if (!existing.startMs) patch.startMs = defaultStartMs;
@@ -340,87 +331,90 @@ export async function ensureContestForCutoff(cutoffAtMs) {
   return existing;
 }
 
-/**
- * ✅ Active contest selection:
- * - Use the most-recent cutoff's contest while it is NOT resolved (this is the current live cycle).
- * - Only switch to the next cutoff's contest once the last one is resolved.
- *
- * This prevents "drifting" into a future contest and fixes "Contest unavailable" during a live cycle.
- */
+/* =========================================================
+   ACTIVE CONTEST SELECTION (FIXED)
+   ✅ Correct for your weekly flow:
+   - The "current contest" is the contest whose cutoffAt is the NEXT cutoff after now.
+   - We also respect contest/current if it already points to a still-active contest.
+========================================================= */
+
+const CURRENT_REF = () => db().collection("contest").doc("current");
+
+// A contest is "still active" if:
+// - not resolved
+// - and it has an endMs/cutoffAt that is still in the future (with a small grace)
+function isContestStillActive(contest, atMs) {
+  if (!contest) return false;
+  if (contest.resolved) return false;
+
+  const t = Number(atMs || 0);
+  const end = Number(contest.endMs || contest.cutoffAt || 0);
+
+  // If we somehow have no end, don’t trust it.
+  if (!Number.isFinite(end) || end <= 0) return false;
+
+  // 2 minute grace for clock skew / race-y saves
+  return t < end + 2 * 60 * 1000;
+}
+
 export async function ensureActiveContestNow() {
   const now = nowMs();
 
-  // 1) Prefer the most-recent cutoff contest (current cycle) if it's not resolved
-  const lastCutoff = mostRecentChicagoCutoffAtOrBefore(now);
-  const lastContest = await ensureContestForCutoff(lastCutoff);
-
-  if (lastContest && !lastContest.resolved) {
-    await db()
-      .collection("contest")
-      .doc("current")
-      .set(
-        {
-          contestId: lastContest.id,
-          cutoffAt: lastContest.cutoffAt,
-          endsOn: lastContest.endsOn,
-          mode: lastContest.mode || "DAILY4",
-          updatedAt: now,
-        },
-        { merge: true }
-      );
-
-    if (!lastContest.activatedAt) {
-      await db().collection("contests").doc(lastContest.id).set({ activatedAt: now }, { merge: true });
-      return { ...lastContest, activatedAt: now };
+  // 0) If contest/current exists and points to a still-active contest, use it.
+  try {
+    const curSnap = await CURRENT_REF().get();
+    if (curSnap.exists) {
+      const cur = curSnap.data() || {};
+      const curId = String(cur.contestId || "").trim();
+      if (curId) {
+        const cSnap = await db().collection("contests").doc(curId).get();
+        if (cSnap.exists) {
+          const contest = { id: cSnap.id, ...(cSnap.data() || {}) };
+          if (isContestStillActive(contest, now)) {
+            if (!contest.activatedAt) {
+              await db().collection("contests").doc(contest.id).set({ activatedAt: now }, { merge: true });
+              return { ...contest, activatedAt: now };
+            }
+            return contest;
+          }
+        }
+      }
     }
-
-    return lastContest;
+  } catch {
+    // ignore and fallback
   }
 
-  // 2) Otherwise, move to the next cutoff contest
+  // 1) Default rule: active contest is the one for the NEXT cutoff after now.
   const nextCutoff = nextChicagoCutoffAfter(now);
-  const nextContest = await ensureContestForCutoff(nextCutoff);
+  const active = await ensureContestForCutoff(nextCutoff);
 
-  await db()
-    .collection("contest")
-    .doc("current")
-    .set(
-      {
-        contestId: nextContest.id,
-        cutoffAt: nextContest.cutoffAt,
-        endsOn: nextContest.endsOn,
-        mode: nextContest.mode || "DAILY4",
-        updatedAt: now,
-      },
-      { merge: true }
-    );
+  // Persist pointer for consistency across servers/clients.
+  await CURRENT_REF().set(
+    {
+      contestId: active.id,
+      cutoffAt: active.cutoffAt,
+      endsOn: active.endsOn,
+      mode: active.mode || "DAILY4",
+      updatedAt: now,
+    },
+    { merge: true }
+  );
 
-  if (!nextContest.activatedAt) {
-    await db().collection("contests").doc(nextContest.id).set({ activatedAt: now }, { merge: true });
-    return { ...nextContest, activatedAt: now };
+  if (!active.activatedAt) {
+    await db().collection("contests").doc(active.id).set({ activatedAt: now }, { merge: true });
+    return { ...active, activatedAt: now };
   }
 
-  return nextContest;
+  return active;
 }
 
 export async function getContestForEntryTime(entryMs) {
   const cutoffAt = cutoffForEntryMs(entryMs);
   const contest = await ensureContestForCutoff(cutoffAt);
 
-  await db()
-    .collection("contest")
-    .doc("current")
-    .set(
-      {
-        contestId: contest.id,
-        cutoffAt: contest.cutoffAt,
-        endsOn: contest.endsOn,
-        mode: contest.mode || "DAILY4",
-        updatedAt: nowMs(),
-      },
-      { merge: true }
-    );
-
+  // IMPORTANT:
+  // Do NOT write contest/current here. That can cause pointer drift and
+  // make the UI “jump” between contests unexpectedly.
   return contest;
 }
 
@@ -437,7 +431,6 @@ export function safeContestForClient(contest) {
     cutoffAt: contest.cutoffAt ?? null,
     endsOn: contest.endsOn ?? null,
 
-    // ✅ send window to clients so countdown is consistent everywhere
     startMs: win.startMs ?? null,
     endMs: win.endMs ?? null,
     windowSource: win.source,
@@ -454,7 +447,7 @@ export function safeContestForClient(contest) {
 }
 
 /* =========================================================
-   AMOE STATE INIT (UNCHANGED STRUCTURE)
+   AMOE STATE INIT
 ========================================================= */
 
 export async function getOrInitAmoeState() {

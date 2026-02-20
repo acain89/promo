@@ -2,7 +2,12 @@
 import { Router } from "express";
 
 import { db } from "../lib/firestore.js";
-import { ensureActiveContestNow, mmddyyyyFromCutoffMs } from "../lib/time.js";
+import {
+  ensureActiveContestNow,
+  getRegistrationWindow,
+  isRegistrationOpenAt,
+  mmddyyyyFromCutoffMs,
+} from "../lib/time.js";
 import { nowMs } from "../lib/utils.js";
 import requireUser from "../middleware/auth.js";
 import { STRIPE_SECRET_KEY, NODE_ENV } from "../lib/config.js";
@@ -84,8 +89,7 @@ function targetsToDaily4Draws(targets, resolvedSlot) {
   const out = { morning: null, day: null, evening: null, night: null };
   if (!targets || typeof targets !== "object") return out;
 
-  const rs =
-    resolvedSlot != null && Number.isFinite(Number(resolvedSlot)) ? Number(resolvedSlot) : null;
+  const rs = resolvedSlot != null && Number.isFinite(Number(resolvedSlot)) ? Number(resolvedSlot) : null;
 
   const setSlot = (slotStr, key) => {
     const slotNum = Number(slotStr);
@@ -105,6 +109,7 @@ function targetsToDaily4Draws(targets, resolvedSlot) {
 
 /* =========================================================
    PUBLIC — CONTEST STATE (ACTIVE CONTEST) — DAILY4 ONLY
+   ✅ Landing countdown now follows the Admin-controlled registration window end
 ========================================================= */
 
 r.get("/api/contest", async (req, res) => {
@@ -118,22 +123,32 @@ r.get("/api/contest", async (req, res) => {
 
     const guaranteedPrizeCents = Number(contest.guaranteedPrizeCents || 0);
     const bonusPrizeCents = Number(contest.bonusPrizeCents || 0);
-    const finalPrizeCents =
-      Number(contest.finalPrizeCents || 0) || guaranteedPrizeCents + bonusPrizeCents;
+    const finalPrizeCents = Number(contest.finalPrizeCents || 0) || guaranteedPrizeCents + bonusPrizeCents;
 
     // Landing headline text (lets Admin change copy without a frontend deploy)
     const prizeHeadline =
       String(contest.prizeHeadline || contest.headline || "").trim() || "$100 guaranteed + bonus";
 
-    // ✅ Authoritative weekly anchor
-    const endsOnMs = contest.cutoffAt ?? null;
+    // ✅ Registration window (includes manual overrides)
+    const win = getRegistrationWindow(contest);
+    const startMs = win.startMs ?? null;
+    const endMs = win.endMs ?? null;
 
-    // ✅ Never trust stored contest.endsOn string (it can be stale). Always compute.
+    // ✅ Landing's big red timer counts down to contest.cutoffAt.
+    // We set cutoffAt to the *registration window end* so it matches Admin.
+    const cutoffAt =
+      Number.isFinite(Number(endMs)) && Number(endMs) > 0 ? Number(endMs) : contest.cutoffAt ?? null;
+
+    const endsOnMs = cutoffAt ?? null;
     const endsOnText = endsOnMs ? mmddyyyyFromCutoffMs(endsOnMs) : null;
 
     // ✅ Lifetime paid-out (manual) from Firestore config/public
     const cfg = await getPublicConfig();
     const totalPaidOutCents = toSafeInt(cfg?.totalPaidOutCents, 0);
+
+    // ✅ Public flags for UX gating
+    const openNow = isRegistrationOpenAt(contest, nowMs());
+    const playStatus = openNow ? "OPEN" : "CLOSED";
 
     return res.json({
       ok: true,
@@ -143,9 +158,20 @@ r.get("/api/contest", async (req, res) => {
 
       id: contest.id || null,
       mode: "DAILY4",
-      cutoffAt: contest.cutoffAt ?? null,
+
+      // ✅ countdown source of truth for Landing
+      cutoffAt,
       endsOnMs,
       endsOn: endsOnText,
+
+      // ✅ expose window for consistency/debug
+      startMs,
+      endMs,
+      windowSource: win.source,
+
+      // optional helper flags
+      playOpen: openNow,
+      playStatus,
 
       resolved: !!contest.resolved,
       resolvedAt: contest.resolvedAt ?? null,
@@ -251,11 +277,7 @@ r.get("/api/amoe/winners", async (req, res) => {
   try {
     setNoCache(res);
     const HISTORY_LIMIT = 52;
-    const snap = await db()
-      .collection("amoeWinners")
-      .orderBy("resolvedAt", "desc")
-      .limit(HISTORY_LIMIT)
-      .get();
+    const snap = await db().collection("amoeWinners").orderBy("resolvedAt", "desc").limit(HISTORY_LIMIT).get();
     return res.json(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
   } catch (e) {
     return res.status(500).json({ error: e.message || "Failed to fetch AMOE winners." });
@@ -284,28 +306,18 @@ r.get("/api/reveal-state", async (req, res) => {
     }
 
     // Winner for THIS contest (historical record)
-    const paidWinnerSnap =
-      paidId
-        ? await db()
-            .collection("winners")
-            .where("contestId", "==", paidId)
-            .orderBy("resolvedAt", "desc")
-            .limit(1)
-            .get()
-        : null;
+    const paidWinnerSnap = paidId
+      ? await db().collection("winners").where("contestId", "==", paidId).orderBy("resolvedAt", "desc").limit(1).get()
+      : null;
 
     const paidWinner =
-      !paidWinnerSnap || paidWinnerSnap.empty
-        ? null
-        : { id: paidWinnerSnap.docs[0].id, ...paidWinnerSnap.docs[0].data() };
+      !paidWinnerSnap || paidWinnerSnap.empty ? null : { id: paidWinnerSnap.docs[0].id, ...paidWinnerSnap.docs[0].data() };
 
     const amoeStateSnap = await db().collection("amoe").doc("state").get();
     const amoeState = amoeStateSnap.exists ? amoeStateSnap.data() : null;
 
     const amoeWinnerSnap = await db().collection("amoeWinners").orderBy("resolvedAt", "desc").limit(1).get();
-    const amoeWinner = amoeWinnerSnap.empty
-      ? null
-      : { id: amoeWinnerSnap.docs[0].id, ...amoeWinnerSnap.docs[0].data() };
+    const amoeWinner = amoeWinnerSnap.empty ? null : { id: amoeWinnerSnap.docs[0].id, ...amoeWinnerSnap.docs[0].data() };
 
     const paidGuaranteed = Number(paid?.guaranteedPrizeCents || 0);
     const paidBonus = Number(paid?.bonusPrizeCents || 0);
@@ -317,9 +329,7 @@ r.get("/api/reveal-state", async (req, res) => {
     const cfg = await getPublicConfig();
     const totalPaidOutCents = toSafeInt(cfg?.totalPaidOutCents, 0);
 
-    const paidTargets =
-      paid?.targets && typeof paid.targets === "object" ? paid.targets : {};
-
+    const paidTargets = paid?.targets && typeof paid.targets === "object" ? paid.targets : {};
     const resolvedSlot = paid?.resolvedSlot ?? null;
 
     // Back-compat convenience for some UIs (and safe fallback for old clients)
@@ -364,8 +374,7 @@ r.get("/api/reveal-state", async (req, res) => {
             bonusPrizeCents: paidBonus,
             finalPrizeCents: paidFinal,
 
-            prizeHeadline:
-              String(paid.prizeHeadline || paid.headline || "").trim() || "$100 guaranteed + bonus",
+            prizeHeadline: String(paid.prizeHeadline || paid.headline || "").trim() || "$100 guaranteed + bonus",
           }
         : {
             id: paidId,

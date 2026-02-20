@@ -1,5 +1,5 @@
 // src/pages/Landing.jsx
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import PanelShell from "../ui/PanelShell.jsx";
 import { apiGet, authMe } from "../lib/api.js";
@@ -45,6 +45,7 @@ export default function Landing() {
   const okBtnRef = useRef(null);
   const lastFocusRef = useRef(null);
 
+  // Tick every second using sponsor-server delta (official timekeeper)
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now() + serverDelta), 1000);
     return () => clearInterval(t);
@@ -57,8 +58,10 @@ export default function Landing() {
         setLoading(true);
       }
 
-      const c = await apiGet("/api/contest");
+      // ✅ Cache-bust so landing reflects admin schedule changes immediately
+      const c = await apiGet(`/api/contest?__ts=${Date.now()}`);
       if (c?.serverNow) setServerDelta(c.serverNow - Date.now());
+
       if (c?.ok) setContest(c);
       else setContest(null);
 
@@ -106,7 +109,22 @@ export default function Landing() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const cutoffAt = contest?.cutoffAt ?? null;
+  // ✅ Timer source-of-truth:
+  // Prefer explicit cutoffAt if backend provides it, otherwise fall back to the active contest endMs/end.
+  const cutoffAt = useMemo(() => {
+    const v =
+      contest?.cutoffAt ??
+      contest?.activeContest?.endMs ??
+      contest?.activeContest?.end ??
+      contest?.endMs ??
+      contest?.end ??
+      null;
+
+    if (v == null) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }, [contest]);
+
   const remaining = cutoffAt ? cutoffAt - now : null;
 
   // Admin can override later; safe fallback now.
@@ -158,22 +176,20 @@ export default function Landing() {
 
   // Live stats (safe fallbacks)
   const livePlayers =
-    Number.isFinite(Number(contest?.entryCount)) ? Number(contest?.entryCount) :
-    Number.isFinite(Number(contest?.playerCount)) ? Number(contest?.playerCount) :
-    0;
+    Number.isFinite(Number(contest?.entryCount))
+      ? Number(contest?.entryCount)
+      : Number.isFinite(Number(contest?.playerCount))
+        ? Number(contest?.playerCount)
+        : 0;
 
   function toCentsMaybe(v) {
     const n = Number(v);
     if (!Number.isFinite(n)) return null;
-    // Heuristic:
-    // - if it's already big (>= 10000), assume it's cents
-    // - if it's small (< 10000), assume it's dollars and convert
-    // (so 2555 -> $2,555 becomes 255500 cents)
-    if (n >= 10000) return Math.round(n);
-    return Math.round(n * 100);
+    if (n >= 10000) return Math.round(n); // assume cents
+    return Math.round(n * 100); // assume dollars
   }
 
-  // ✅ ADD THIS LINE: pull the lifetime paid-out cents from /api/contest
+  // ✅ Pull lifetime paid-out cents from /api/contest
   const totalPaidOutCents = toCentsMaybe(contest?.totalPaidOutCents) ?? 0;
 
   const statBoxStyle = {
@@ -183,7 +199,7 @@ export default function Landing() {
     background: "rgba(255,255,255,0.04)",
     border: "1px solid rgba(255,255,255,0.10)",
     boxShadow: "0 0 0 1px rgba(0,0,0,0.25) inset",
-    minHeight: 46, // roughly button height, but looks tighter
+    minHeight: 46,
     display: "flex",
     flexDirection: "column",
     justifyContent: "center",
@@ -242,7 +258,6 @@ export default function Landing() {
         </>
       }
     >
-      {/* Move everything up (footer stays at bottom in PanelShell) */}
       <div
         style={{
           minHeight: "calc(100dvh - 170px)",
@@ -253,7 +268,6 @@ export default function Landing() {
         }}
       >
         <div style={{ width: "100%", display: "grid", gap: 12, textAlign: "center" }}>
-          {/* Title + slogan */}
           <div
             style={{
               fontSize: 34,
@@ -272,7 +286,6 @@ export default function Landing() {
             <span style={{ color: "#7affc2" }}>Reveal.</span>
           </div>
 
-          {/* Prize box — bold neon border */}
           <div
             style={{
               padding: "16px 18px",
@@ -287,26 +300,19 @@ export default function Landing() {
             {prizeHeadline}
           </div>
 
-          {/* Odds line — 3 lines, centered */}
           <div style={{ ...infoTextStyle, marginTop: -4 }}>
             <div>Odds: 1 in total number of players this week.</div>
             <div>Someone is going to win.</div>
             <div>Could be you.</div>
           </div>
 
-          {/* Timer */}
           <div className="countdownTimer" aria-label="Countdown">
             {formatDDHHMMSS(remaining)}
           </div>
 
-          {/* Under-timer helper text — same size/color as odds */}
-          <div style={{ ...infoTextStyle, marginTop: -6 }}>
-            Time left to lock in your submission.
-          </div>
+          <div style={{ ...infoTextStyle, marginTop: -6 }}>Time left to lock in your submission.</div>
 
-          {/* Buttons / Stats */}
           <div className="form" style={{ marginTop: 4 }}>
-            {/* Where Enter USED to be: 2 live stat blocks, same size */}
             <div style={{ display: "flex", gap: 10, width: "100%" }}>
               <div style={statBoxStyle} aria-label="Live player count">
                 <div style={statLabelStyle}>Live Players</div>
@@ -319,12 +325,10 @@ export default function Landing() {
               </div>
             </div>
 
-            {/* Move Enter DOWN */}
             <button className="primary" onClick={onEnter} disabled={enterDisabled} style={{ marginTop: 10 }}>
               Enter
             </button>
 
-            {/* Winners button removed */}
             <button className="secondary" onClick={openHow} disabled={loading}>
               How To Play
             </button>
@@ -340,14 +344,12 @@ export default function Landing() {
         </div>
       </div>
 
-      {/* How To Play Modal */}
       {showHow ? (
         <div
           role="dialog"
           aria-modal="true"
           aria-label="How to play"
           onMouseDown={(e) => {
-            // click outside closes
             if (e.target === e.currentTarget) closeHow();
           }}
           style={{

@@ -736,62 +736,76 @@ export default function Admin() {
     });
   }
 
-  // ✅ Schedule actions
-  function computeRegOpen() {
-    const now = Number(state?.serverNow || Date.now());
-    const startMs = Number(active?.startMs ?? active?.start ?? 0);
-    const endMs = Number(active?.endMs ?? active?.end ?? 0);
-    const resolved = !!active?.resolved;
-    if (!startMs || !endMs) return null; // unknown
-    if (resolved) return false;
-    return now >= startMs && now < endMs;
+ // ✅ Schedule actions
+function computeRegOpen() {
+  const now = Number(state?.serverNow || Date.now());
+  const s = Number(active?.startMs ?? active?.start ?? 0);
+  const e = Number(active?.endMs ?? active?.end ?? 0);
+  const resolved = !!active?.resolved;
+
+  if (!s || !e) return null; // unknown
+  if (resolved) return false;
+  return now >= s && now < e;
+}
+
+async function saveWindow() {
+  if (schedBusy) return;
+
+  const newStart = localInputToMs(schedStart);
+  const newEnd = localInputToMs(schedEnd);
+
+  try {
+    setSchedBusy(true);
+    setSchedErr("");
+    setStatus("");
+    setErr("");
+
+    if (!newStart || !newEnd) throw new Error("Start and End are required.");
+    if (newEnd <= newStart) throw new Error("End must be after Start.");
+
+    const confirmText =
+      `SAVE NEW SCHEDULE?\n\n` +
+      `Start: ${formatTS(newStart)}\n` +
+      `End:   ${formatTS(newEnd)}\n\n` +
+      `This will CLOSE the current contest and start a NEW one.\n\n` +
+      `Proceed?`;
+
+    if (!window.confirm(confirmText)) return;
+
+    // ⭐ MASTER ROUTE
+    await apiPost("/api/admin/schedule/commit", {
+      startMs: newStart,
+      endMs: newEnd,
+    });
+
+    await refresh();
+
+    setStatus("New contest started. Timer updated.");
+  } catch (e) {
+    setSchedErr(errMsg(e, "Failed to save schedule."));
+  } finally {
+    setSchedBusy(false);
   }
+}
 
-  async function saveWindow() {
-    if (schedBusy) return;
+async function startNow() {
+  const now = Number(state?.serverNow || Date.now());
+  setSchedStart(msToLocalInput(now - 5000));
+}
 
-    const contestId = String(active?.id || "").trim();
-    const startMs = localInputToMs(schedStart);
-    const endMs = localInputToMs(schedEnd);
+async function endNow() {
+  const now = Number(state?.serverNow || Date.now());
+  setSchedEnd(msToLocalInput(now));
+}
 
-    try {
-      setSchedBusy(true);
-      setSchedErr("");
-      setStatus("");
-      setErr("");
+  // Current Game panel values (best-effort)
+  const paidEntryCount = Number(active?.entryCount || 0);
+  const paidEntryPriceUsd = 10;
+  const paidAmountUsd = paidEntryCount * paidEntryPriceUsd;
 
-      if (!contestId) throw new Error("Missing contestId.");
-      if (!startMs || !endMs) throw new Error("Start and End are required.");
-      if (endMs <= startMs) throw new Error("End must be after Start.");
+  const resolved = !!active?.resolved;
 
-      const confirmText =
-        `SET Registration Window?\n\n` +
-        `Start: ${formatTS(startMs)}\n` +
-        `End:   ${formatTS(endMs)}\n\n` +
-        `This controls when PAID entries are allowed.\nProceed?`;
-
-      if (!window.confirm(confirmText)) return;
-
-      await apiPost("/api/admin/contest/window", { contestId, startMs, endMs });
-      setStatus("Window updated.");
-      await refresh();
-    } catch (e) {
-      setSchedErr(errMsg(e, "Failed to set window."));
-    } finally {
-      setSchedBusy(false);
-    }
-  }
-
-  async function startNow() {
-    const now = Number(state?.serverNow || Date.now());
-    setSchedStart(msToLocalInput(now - 5000));
-  }
-
-  async function endNow() {
-    const now = Number(state?.serverNow || Date.now());
-    setSchedEnd(msToLocalInput(now));
-  }
-
+  // ---------- Styles (must be defined before any early return) ----------
   const pageStyle = {
     minHeight: "100svh",
     width: "100%",
@@ -825,13 +839,6 @@ export default function Admin() {
   };
 
   const compactRow = { display: "flex", justifyContent: "space-between", gap: 10 };
-
-  // Current Game panel values (best-effort)
-  const paidEntryCount = Number(active?.entryCount || 0);
-  const paidEntryPriceUsd = 10;
-  const paidAmountUsd = paidEntryCount * paidEntryPriceUsd;
-
-  const resolved = !!active?.resolved;
 
   if (!unlocked) {
     return (

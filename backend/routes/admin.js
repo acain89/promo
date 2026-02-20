@@ -20,9 +20,11 @@ import { onlyDigits, normalizeNumber, absDiff, nowMs } from "../lib/utils.js";
 
 import {
   ensureActiveContestNow,
+  ensureContestForCutoff, // ✅ NEW: use endMs as cutoff to create the next contest deterministically
   mostRecentChicagoCutoffAtOrBefore,
   contestIdFromCutoffMs,
   getOrInitAmoeState,
+  setManualRegistrationWindow,
 } from "../lib/time.js";
 
 const r = Router();
@@ -42,38 +44,19 @@ function clampInt(n, lo, hi) {
 
 /**
  * Parse a money-ish input as DOLLARS -> CENTS.
- * Accepts:
- * - 100      => $100.00 -> 10000
- * - 100.50   => $100.50 -> 10050
- * - "$100.50" => 10050
- *
- * NOTE: This function intentionally treats integers as dollars (not cents),
- * since these are admin-facing inputs.
  */
 function parseMoneyToCents(input) {
   const raw = String(input ?? "").trim();
   const cleaned = raw.replace(/[^0-9.]/g, "");
   if (!cleaned) return null;
-
-  // disallow multiple decimals
   if ((cleaned.match(/\./g) || []).length > 1) return null;
-
   const f = Number(cleaned);
-  if (!Number.isFinite(f)) return null;
-  if (f < 0) return null;
-
+  if (!Number.isFinite(f) || f < 0) return null;
   return Math.round(f * 100);
 }
 
 /**
- * Parse datetime inputs for admin timer override.
- * Accepts:
- *  - milliseconds (number)
- *  - ISO string (e.g. "2026-02-21T09:00:00-06:00" or "2026-02-21T15:00:00Z")
- *  - HTML datetime-local value (e.g. "2026-02-21T09:00") -> interpreted as LOCAL SERVER time
- *
- * Recommendation for frontend:
- *  - Send ms since epoch from client to avoid timezone ambiguity.
+ * Parse datetime inputs.
  */
 function parseMs(input) {
   if (input == null) return null;
@@ -99,8 +82,6 @@ function parseMs(input) {
 
 /**
  * Entries eligible for counting.
- * Source of truth: countedInContest === true.
- * (This is what prevents "paid but not counted" or any legacy junk from claiming numbers.)
  */
 function isPaidEntryEligible(e) {
   if (!e) return false;
@@ -113,19 +94,13 @@ function isPaidEntryEligible(e) {
     return e.countedInContest === true;
   }
 
-  // Back-compat fallback (should be rare once everything writes countedInContest)
+  // Back-compat fallback
   if (s === "QUEUED") return false;
   return true;
 }
 
-/**
- * Unified eligibility:
- * - paid entries that qualify (paid + countedInContest true)
- * - AMOE entries mirrored into the contest pool MUST ALSO be countedInContest true
- */
 function isUnifiedEligible(e) {
   if (!e) return false;
-
   if (isPaidEntryEligible(e)) return true;
 
   const isAmoe =
@@ -134,7 +109,6 @@ function isUnifiedEligible(e) {
     String(e.status || "").toUpperCase() === "AMOE";
 
   if (isAmoe) return e.countedInContest === true;
-
   return false;
 }
 
@@ -158,7 +132,7 @@ function pickContestIdOrLast(contestIdMaybe) {
 
 function parse4DigitNumber(raw) {
   const d = onlyDigits(raw);
-  if (d.length !== 4) return null; // ✅ enforce EXACT 4 digits (0000–9999)
+  if (d.length !== 4) return null;
   const n = Number(d);
   if (!Number.isFinite(n)) return null;
   if (n < 0 || n > 9999) return null;
@@ -180,10 +154,6 @@ function slotToLabel(slot) {
   }
 }
 
-/**
- * Firestore helper: delete an entire collection in safe batches.
- * Returns number of deleted docs.
- */
 async function deleteCollectionInBatches(colRef, batchSize = 400) {
   let deleted = 0;
 
@@ -196,17 +166,12 @@ async function deleteCollectionInBatches(colRef, batchSize = 400) {
     await batch.commit();
 
     deleted += snap.size;
-
     if (snap.size < batchSize) break;
   }
 
   return deleted;
 }
 
-/**
- * Firestore helper: delete a QUERY result set in safe batches.
- * Returns number of deleted docs.
- */
 async function deleteQueryInBatches(query, batchSize = 400) {
   let deleted = 0;
 
@@ -219,20 +184,14 @@ async function deleteQueryInBatches(query, batchSize = 400) {
     await batch.commit();
 
     deleted += snap.size;
-
     if (snap.size < batchSize) break;
   }
 
   return deleted;
 }
 
-/**
- * Trim a collection by resolvedAt desc, keep newest HISTORY_LIMIT.
- * Uses a bounded query so we don’t scan the whole collection.
- */
 async function trimByResolvedAt(collectionName, keep = HISTORY_LIMIT) {
   const cap = Math.max(0, Number(keep || 0));
-  // Fetch only enough to know what to delete (keep + up to 300 extra)
   const snap = await db()
     .collection(collectionName)
     .orderBy("resolvedAt", "desc")
@@ -251,12 +210,10 @@ async function trimByResolvedAt(collectionName, keep = HISTORY_LIMIT) {
 }
 
 /* =========================================================
-   STATS — LIFETIME "TOTAL PAID OUT" (MANUAL)
-   ✅ Source of truth for Landing: config/public.totalPaidOutCents
-   ✅ Keep legacy mirror: stats/global.totalPaidCents
+   STATS — LIFETIME "TOTAL PAID OUT"
 ========================================================= */
 
-const TOTAL_PAID_CAP_CENTS = 10_000_000_00; // $10,000,000.00
+const TOTAL_PAID_CAP_CENTS = 10_000_000_00;
 
 const PUBLIC_CFG_REF = () => db().collection("config").doc("public");
 const GLOBAL_STATS_REF = () => db().collection("stats").doc("global");
@@ -328,10 +285,10 @@ async function setTotalPaidCentsAbsolute(totalCents) {
 }
 
 /* =========================================================
-   ADMIN — PRIZE CONFIG (WEEKLY GUARANTEED + BONUS)
+   ADMIN — PRIZE CONFIG
 ========================================================= */
 
-const PRIZE_MAX_CENTS = 1_000_000_00; // $1,000,000.00 cap safety
+const PRIZE_MAX_CENTS = 1_000_000_00;
 
 async function getPrizeConfig() {
   const ref = db().collection("config").doc("public");
@@ -386,103 +343,140 @@ async function setPrizeConfig({ weeklyGuaranteedPrizeCents, weeklyBonusPrizeCent
 }
 
 /* =========================================================
-   ADMIN — CONTEST REGISTRATION WINDOW (MANUAL OVERRIDE)
-   Stores per-contest fields so you can host midweek mini-games.
+   AUDIT EXPORT PACK (MASTER EXPORT)
+   - contest snapshot + winner record + all contest entries
+   - AMOE state + AMOE entries for the current cycle
 ========================================================= */
 
-function contestRegPatch({ openAtMs, closeAtMs, enabled }) {
+async function getWinnerRecordForContest(contestId) {
+  const snap = await db()
+    .collection("winners")
+    .where("contestId", "==", contestId)
+    .orderBy("resolvedAt", "desc")
+    .limit(1)
+    .get();
+
+  if (snap.empty) return null;
+  return { id: snap.docs[0].id, ...snap.docs[0].data() };
+}
+
+async function buildAuditPack({ contestId, amoeCycleId }) {
+  const serverNow = nowMs();
+
+  // contest
+  const contestSnap = await db().collection("contests").doc(contestId).get();
+  const contest = contestSnap.exists ? contestSnap.data() || {} : null;
+
+  // entries under contest pool (paid + mirrored AMOE)
+  const entriesSnap = await db().collection("entries").doc(contestId).collection("items").get();
+  const entries = entriesSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+  // winner record
+  const winnerRecord = await getWinnerRecordForContest(contestId);
+
+  // AMOE state + entries for that cycle
+  const { state: amoeState } = await getOrInitAmoeState();
+  const cycleId = Number(amoeCycleId || amoeState.cycleId || 1);
+
+  const amoeEntriesSnap = await db().collection("amoeEntries").doc(String(cycleId)).collection("items").get();
+  const amoeEntries = amoeEntriesSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+  const amoeWinnerSnap = await db()
+    .collection("amoeWinners")
+    .where("cycleId", "==", cycleId)
+    .orderBy("resolvedAt", "desc")
+    .limit(1)
+    .get();
+
+  const amoeWinner = amoeWinnerSnap.empty ? null : { id: amoeWinnerSnap.docs[0].id, ...amoeWinnerSnap.docs[0].data() };
+
+  const totalPaidCents = await getTotalPaidCents();
+  const prizeCfg = await getPrizeConfig();
+
+  const guaranteed = Number(contest?.guaranteedPrizeCents || prizeCfg.weeklyGuaranteedPrizeCents || 0);
+  const bonus = Number(contest?.bonusPrizeCents || prizeCfg.weeklyBonusPrizeCents || 0);
+  const finalPrize = Number(contest?.finalPrizeCents || 0) || guaranteed + bonus;
+
   return {
-    registrationOpenAt: openAtMs ?? null,
-    registrationCloseAt: closeAtMs ?? null,
-    registrationWindowEnabled: !!enabled,
-    registrationWindowSource: enabled ? "MANUAL" : "DEFAULT",
-    registrationWindowUpdatedAt: nowMs(),
+    kind: "DRAWNFRAY_AUDIT_PACK_V1",
+    exportedAt: serverNow,
+    serverNow,
+    contestId,
+    amoeCycleId: cycleId,
+    stats: { totalPaidCents },
+    config: {
+      weeklyGuaranteedPrizeCents: prizeCfg.weeklyGuaranteedPrizeCents,
+      weeklyBonusPrizeCents: prizeCfg.weeklyBonusPrizeCents,
+      amoeTargetCount: AMOE_TARGET_COUNT,
+      amoePrizeCents: AMOE_PRIZE_CENTS,
+    },
+    contest: contest
+      ? {
+          id: contest.id || contestId,
+          mode: String(contest.mode || "DAILY4").toUpperCase(),
+          cutoffAt: contest.cutoffAt ?? null,
+          endsOn: contest.endsOn ?? null,
+          activatedAt: contest.activatedAt ?? null,
+
+          // schedule fields
+          startMs: contest.startMs ?? null,
+          endMs: contest.endMs ?? null,
+          manualWindowEnabled: !!contest.manualWindowEnabled,
+          manualStartMs: contest.manualStartMs ?? null,
+          manualEndMs: contest.manualEndMs ?? null,
+          manualWindowUpdatedAt: contest.manualWindowUpdatedAt ?? null,
+
+          // resolve fields
+          resolved: !!contest.resolved,
+          resolvedAt: contest.resolvedAt ?? null,
+          resolvedBy: contest.resolvedBy ?? null,
+          resolvedSlot: contest.resolvedSlot ?? null,
+
+          // targets + winner/projection
+          targetNumber: contest.targetNumber ?? null, // legacy
+          targets: contest.targets ?? {},
+          targetsUpdatedAt: contest.targetsUpdatedAt ?? null,
+          projectedWinner: contest.projectedWinner ?? null,
+          winner: contest.winner ?? null,
+
+          // prize
+          entryCount: Number(contest.entryCount || 0),
+          guaranteedPrizeCents: guaranteed,
+          bonusPrizeCents: bonus,
+          finalPrizeCents: finalPrize,
+
+          createdAt: contest.createdAt ?? null,
+          prizeUpdatedAt: contest.prizeUpdatedAt ?? null,
+          resetAt: contest.resetAt ?? null,
+        }
+      : null,
+    winnerRecord,
+    contestEntries: {
+      count: entries.length,
+      items: entries,
+    },
+    amoe: {
+      state: {
+        cycleId: Number(amoeState.cycleId || 1),
+        status: amoeState.status || "COLLECTING",
+        count: Number(amoeState.count || 0),
+        reachedAt: amoeState.reachedAt ?? null,
+        resolvedAt: amoeState.resolvedAt ?? null,
+        targetNumber: amoeState.targetNumber ?? null,
+        prizeCents: Number(amoeState.prizeCents || AMOE_PRIZE_CENTS),
+      },
+      exportedCycleId: cycleId,
+      winner: amoeWinner,
+      entries: {
+        count: amoeEntries.length,
+        items: amoeEntries,
+      },
+    },
   };
 }
 
-r.post(
-  "/api/admin/contest/window/set",
-  requireAdmin,
-  rateLimit({ routeKey: "admin_contest_window_set", limit: 30, windowMs: 15 * 60 * 1000 }),
-  async (req, res) => {
-    try {
-      const { contestId, openAt, closeAt } = req.body || {};
-
-      // Default: set on current active contest
-      let id = String(contestId || "").trim();
-      if (!id) {
-        const active = await ensureActiveContestNow();
-        id = String(active?.id || "").trim();
-      }
-      if (!id) return res.status(400).json({ error: "Contest not available." });
-
-      const openAtMs = parseMs(openAt);
-      const closeAtMs = parseMs(closeAt);
-
-      if (!openAtMs || !closeAtMs) {
-        return res.status(400).json({ error: "Invalid openAt/closeAt. Provide ms or ISO datetime string." });
-      }
-      if (closeAtMs <= openAtMs) {
-        return res.status(400).json({ error: "closeAt must be after openAt." });
-      }
-
-      const contestRef = db().collection("contests").doc(id);
-      const snap = await contestRef.get();
-      if (!snap.exists) return res.status(400).json({ error: "No such contest." });
-
-      const patch = contestRegPatch({ openAtMs, closeAtMs, enabled: true });
-      await contestRef.set(patch, { merge: true });
-
-      await auditLog(
-        "admin_contest_window_set",
-        { contestId: id, openAtMs, closeAtMs, source: "MANUAL" },
-        req
-      );
-
-      return res.json({
-        ok: true,
-        contestId: id,
-        ...patch,
-      });
-    } catch (e) {
-      return res.status(400).json({ error: e.message || "Failed to set window." });
-    }
-  }
-);
-
-r.post(
-  "/api/admin/contest/window/clear",
-  requireAdmin,
-  rateLimit({ routeKey: "admin_contest_window_clear", limit: 30, windowMs: 15 * 60 * 1000 }),
-  async (req, res) => {
-    try {
-      const { contestId } = req.body || {};
-
-      let id = String(contestId || "").trim();
-      if (!id) {
-        const active = await ensureActiveContestNow();
-        id = String(active?.id || "").trim();
-      }
-      if (!id) return res.status(400).json({ error: "Contest not available." });
-
-      const contestRef = db().collection("contests").doc(id);
-      const snap = await contestRef.get();
-      if (!snap.exists) return res.status(400).json({ error: "No such contest." });
-
-      const patch = contestRegPatch({ openAtMs: null, closeAtMs: null, enabled: false });
-      await contestRef.set(patch, { merge: true });
-
-      await auditLog("admin_contest_window_clear", { contestId: id }, req);
-
-      return res.json({ ok: true, contestId: id, ...patch });
-    } catch (e) {
-      return res.status(400).json({ error: e.message || "Failed to clear window." });
-    }
-  }
-);
-
 /* =========================================================
-   ADMIN — LOGIN (CODE -> TOKEN)
+   ADMIN — LOGIN
 ========================================================= */
 
 r.post(
@@ -497,7 +491,6 @@ r.post(
         return res.status(500).json({ error: "ADMIN_TOKEN_SECRET not configured." });
       }
 
-      // ✅ compare normalized values (prevents whitespace mismatch / number-vs-string surprises)
       if (c !== String(ADMIN_CODE || "").trim()) return res.status(401).json({ error: "Unauthorized." });
 
       const now = nowMs();
@@ -517,7 +510,7 @@ r.post(
 );
 
 /* =========================================================
-   ADMIN — STATS (LIFETIME PAID OUT)
+   ADMIN — STATS
 ========================================================= */
 
 r.post(
@@ -574,7 +567,7 @@ r.post(
 );
 
 /* =========================================================
-   ADMIN — PRIZE CONFIG (GET/SET)
+   ADMIN — PRIZE CONFIG
 ========================================================= */
 
 r.post(
@@ -630,7 +623,7 @@ r.post(
 );
 
 /* =========================================================
-   ADMIN — COMBINED STATE (ACTIVE CONTEST + AMOE STATE)
+   ADMIN — COMBINED STATE
 ========================================================= */
 
 r.post(
@@ -677,14 +670,11 @@ r.post(
       return res.json({
         ok: true,
         serverNow: nowMs(),
-
         stats: { totalPaidCents },
-
         config: {
           weeklyGuaranteedPrizeCents: prizeCfg.weeklyGuaranteedPrizeCents,
           weeklyBonusPrizeCents: prizeCfg.weeklyBonusPrizeCents,
         },
-
         activeContest: {
           id: active.id || null,
           mode: "DAILY4",
@@ -695,17 +685,12 @@ r.post(
           startMs: active.startMs ?? active.start ?? null,
           endMs: active.endMs ?? active.end ?? null,
 
-          // ✅ registration window fields (manual override capable)
-          registrationOpenAt: active.registrationOpenAt ?? null,
-          registrationCloseAt: active.registrationCloseAt ?? null,
-          registrationWindowEnabled: !!active.registrationWindowEnabled,
-          registrationWindowSource: active.registrationWindowSource || "DEFAULT",
-          registrationWindowUpdatedAt: active.registrationWindowUpdatedAt ?? null,
+          manualWindowEnabled: !!active.manualWindowEnabled,
+          manualStartMs: active.manualStartMs ?? null,
+          manualEndMs: active.manualEndMs ?? null,
+          manualWindowUpdatedAt: active.manualWindowUpdatedAt ?? null,
 
-          // legacy (kept for compatibility)
           targetNumber: active.targetNumber ?? null,
-
-          // new 4-target flow
           targets,
           projectedWinner: projected,
 
@@ -715,7 +700,6 @@ r.post(
           finalPrizeCents: activeFinal,
           activatedAt: active.activatedAt ?? null,
         },
-
         lastContest: lastContest
           ? {
               id: lastContest.id || lastId,
@@ -731,15 +715,12 @@ r.post(
               finalPrizeCents: lastFinal,
               activatedAt: lastContest.activatedAt ?? null,
 
-              // optional mirror (not required, but harmless if present)
-              registrationOpenAt: lastContest.registrationOpenAt ?? null,
-              registrationCloseAt: lastContest.registrationCloseAt ?? null,
-              registrationWindowEnabled: !!lastContest.registrationWindowEnabled,
-              registrationWindowSource: lastContest.registrationWindowSource || "DEFAULT",
-              registrationWindowUpdatedAt: lastContest.registrationWindowUpdatedAt ?? null,
+              manualWindowEnabled: !!lastContest.manualWindowEnabled,
+              manualStartMs: lastContest.manualStartMs ?? null,
+              manualEndMs: lastContest.manualEndMs ?? null,
+              manualWindowUpdatedAt: lastContest.manualWindowUpdatedAt ?? null,
             }
           : null,
-
         amoe: {
           cycleId: amoeState.cycleId ?? 1,
           status: amoeState.status || "COLLECTING",
@@ -759,10 +740,6 @@ r.post(
 
 /* =========================================================
    UNIFIED RESOLVE ENGINE (PAID + AMOE)
-   - 4-digit targets only
-   - Tie-break: same diff -> earlier timestamp wins
-   - Exact match: resolves contest early
-   - Otherwise: updates projectedWinner (best so far)
 ========================================================= */
 
 async function computeUnifiedBest({ contestId, targetNumber }) {
@@ -824,9 +801,7 @@ r.post(
       const s = clampInt(slot, 1, 4);
       if (s == null) throw new Error("Invalid slot. Must be 1–4.");
 
-      // Compute best OUTSIDE the transaction (avoid non-tx reads inside tx callback)
       const r0 = await computeUnifiedBest({ contestId: id, targetNumber });
-
       const contestRef = db().collection("contests").doc(id);
 
       const result = await db().runTransaction(async (tx) => {
@@ -849,7 +824,6 @@ r.post(
 
         const nextDiff = Number(r0.best.diff);
         const nextTs = Number(r0.best.timestamp);
-
         const beatsProjected = nextDiff < curDiff || (nextDiff === curDiff && nextTs < curTs);
 
         const projectedWinner = beatsProjected
@@ -896,10 +870,7 @@ r.post(
           patch.resolvedBy = exactHit ? "EXACT" : "CLOSEST";
           patch.resolvedSlot = s;
 
-          // legacy
           patch.targetNumber = exactHit ? r0.targetNorm : projectedWinner?.target ?? r0.targetNorm;
-
-          // snapshot
           patch.winner = projectedWinner || null;
         }
 
@@ -912,11 +883,9 @@ r.post(
           playedAt,
           target: r0.targetNorm,
           exactHit,
-
           finalized: exactHit || finalizeByClosest,
           finalizedBy: exactHit ? "EXACT" : finalizeByClosest ? "CLOSEST" : null,
           finalizedSlot: exactHit || finalizeByClosest ? s : null,
-
           best: {
             winnerUN: r0.best.username || r0.best.name || r0.best.email || "—",
             winnerUserId: r0.best.userId || null,
@@ -946,7 +915,6 @@ r.post(
           contestId: result.contestId,
           endsOn: contest.endsOn || null,
           mode: "DAILY4",
-
           resolvedBy: contest.resolvedBy || result.finalizedBy || (result.exactHit ? "EXACT" : "CLOSEST"),
           resolvedSlot: Number(contest.resolvedSlot || result.finalizedSlot || result.slot),
 
@@ -1003,10 +971,194 @@ r.post(
   }
 );
 
+/* =========================================================
+   ✅ MASTER ROLLOVER: ADMIN — SCHEDULE COMMIT
+   Payload:
+     { startMs, endMs }
+   Behavior:
+     - exports FULL audit pack for the contest being ended + current AMOE cycle
+     - resolves current contest if needed (ADMIN_ROLLOVER)
+     - creates/activates next contest using endMs as cutoffAt
+     - applies manual window on new contest
+     - advances contest/current pointer
+     - resets AMOE cycle (increments cycleId; does NOT delete history)
+========================================================= */
+
+async function resolveContestAdminRollover(contestId, req) {
+  const id = String(contestId || "").trim();
+  if (!id) throw new Error("Missing contestId.");
+
+  const ref = db().collection("contests").doc(id);
+
+  await db().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw new Error("No such contest.");
+
+    const c = snap.data() || {};
+    if (c.resolved) return; // idempotent
+
+    tx.set(
+      ref,
+      {
+        mode: "DAILY4",
+        resolved: true,
+        resolvedAt: nowMs(),
+        resolvedBy: "ADMIN_ROLLOVER",
+        resolvedSlot: 0,
+        // do NOT fabricate a winner
+        winner: null,
+      },
+      { merge: true }
+    );
+  });
+
+  await auditLog("admin_contest_resolve_admin_rollover", { contestId: id }, req);
+}
+
+async function pointCurrentContest(contest) {
+  const now = nowMs();
+  await db()
+    .collection("contest")
+    .doc("current")
+    .set(
+      {
+        contestId: contest.id,
+        cutoffAt: contest.cutoffAt ?? null,
+        endsOn: contest.endsOn ?? null,
+        mode: contest.mode || "DAILY4",
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+}
+
+async function resetAmoeCycle(req) {
+  const { ref: stateRef, state } = await getOrInitAmoeState();
+  const curCycleId = Number(state.cycleId || 1);
+  const nextCycle = curCycleId + 1;
+
+  await stateRef.set(
+    {
+      cycleId: nextCycle,
+      status: "COLLECTING",
+      count: 0,
+      reachedAt: null,
+      resolvedAt: null,
+      targetNumber: null,
+      prizeCents: AMOE_PRIZE_CENTS,
+      updatedAt: nowMs(),
+    },
+    { merge: true }
+  );
+
+  await auditLog("admin_amoe_cycle_rollover", { amoePrevCycleId: curCycleId, amoeNextCycleId: nextCycle }, req);
+
+  return { amoePrevCycleId: curCycleId, amoeNextCycleId: nextCycle };
+}
+
+r.post(
+  "/api/admin/schedule/commit",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_schedule_commit", limit: 30, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const { startMs, endMs } = req.body || {};
+
+      const s = parseMs(startMs);
+      const e = parseMs(endMs);
+
+      if (!s || !e) throw new Error("Invalid startMs/endMs.");
+      if (e <= s) throw new Error("endMs must be after startMs.");
+
+      // Guardrail: don't allow instantly-expired windows
+      if (e <= nowMs() + 15_000) throw new Error("endMs must be in the future.");
+
+      // Identify the contest being ended + AMOE cycle being exported
+      const active = await ensureActiveContestNow();
+      if (!active?.id) throw new Error("Active contest not available.");
+
+      const { state: amoeState } = await getOrInitAmoeState();
+      const exportCycleId = Number(amoeState.cycleId || 1);
+
+      // 1) Build FULL audit pack BEFORE touching anything
+      const auditPack = await buildAuditPack({ contestId: active.id, amoeCycleId: exportCycleId });
+
+      // 2) Resolve current contest if not already resolved (do not overwrite true winners)
+      await resolveContestAdminRollover(active.id, req);
+
+      // 3) Create/ensure the next contest based on the cutoff you set (endMs)
+      const next = await ensureContestForCutoff(e);
+      if (!next?.id) throw new Error("Next contest not available.");
+
+      // 4) Apply manual override on next contest (source of truth fields)
+      await setManualRegistrationWindow(next.id, s, e, true);
+
+      // Also mirror startMs/endMs for older codepaths (harmless)
+      try {
+        await db()
+          .collection("contests")
+          .doc(next.id)
+          .set(
+            {
+              mode: "DAILY4",
+              startMs: s,
+              endMs: e,
+              windowUpdatedAt: nowMs(),
+              // ensure a clean slate explicitly (even though new contests already are)
+              resolved: false,
+              resolvedAt: null,
+              resolvedBy: null,
+              resolvedSlot: null,
+              winner: null,
+              targetNumber: null,
+              targets: {},
+              projectedWinner: null,
+              targetsUpdatedAt: null,
+              entryCount: 0,
+            },
+            { merge: true }
+          );
+      } catch {}
+
+      // 5) Point contest/current to next so the whole site flips immediately
+      await pointCurrentContest({ ...next, mode: next.mode || "DAILY4" });
+
+      // 6) Roll AMOE cycle so new week starts clean (history remains)
+      const amoeRollover = await resetAmoeCycle(req);
+
+      await auditLog(
+        "admin_schedule_commit_master",
+        {
+          prevContestId: active.id,
+          nextContestId: next.id,
+          manualStartMs: s,
+          manualEndMs: e,
+          exportedAmoeCycleId: exportCycleId,
+          ...amoeRollover,
+        },
+        req
+      );
+
+      return res.json({
+        ok: true,
+        prevContestId: active.id,
+        nextContestId: next.id,
+        startMs: s,
+        endMs: e,
+        // ✅ this is what your frontend should download/print/store
+        auditPack,
+        // helpful for UI status
+        exportedAmoeCycleId: exportCycleId,
+        ...amoeRollover,
+      });
+    } catch (e) {
+      return res.status(400).json({ error: e.message || "Failed to commit schedule." });
+    }
+  }
+);
 
 /* =========================================================
-   ADMIN — CONTEST REGISTRATION WINDOW (PAID)
-   - stores startMs/endMs on contests/{contestId}
+   ADMIN — CONTEST WINDOW (LEGACY ENDPOINT)
 ========================================================= */
 
 r.post(
@@ -1018,25 +1170,19 @@ r.post(
       const { contestId, startMs, endMs } = req.body || {};
 
       const id = String(contestId || "").trim();
-      const s = Number(startMs);
-      const e = Number(endMs);
+      const s = parseMs(startMs);
+      const e = parseMs(endMs);
 
       if (!id) throw new Error("Missing contestId.");
-      if (!Number.isFinite(s) || !Number.isFinite(e)) throw new Error("Invalid start/end.");
+      if (!s || !e) throw new Error("Invalid start/end.");
       if (e <= s) throw new Error("End must be after Start.");
 
       const contestRef = db().collection("contests").doc(id);
       const snap = await contestRef.get();
       if (!snap.exists) throw new Error("No such contest.");
 
-      await contestRef.set(
-        {
-          startMs: s,
-          endMs: e,
-          windowUpdatedAt: nowMs(),
-        },
-        { merge: true }
-      );
+      await setManualRegistrationWindow(id, s, e, true);
+      await contestRef.set({ startMs: s, endMs: e, windowUpdatedAt: nowMs() }, { merge: true });
 
       await auditLog("admin_contest_window_set", { contestId: id, startMs: s, endMs: e }, req);
 
@@ -1046,9 +1192,10 @@ r.post(
     }
   }
 );
+
 /* =========================================================
    ADMIN — RESET (WIPE PAID + AMOE ENTRIES)
-   ✅ SIM FEATURE REMOVED: no sim-only wipe route remains
+   NOTE: kept, but you may no longer NEED this once UI is simplified.
 ========================================================= */
 
 r.post(
@@ -1059,7 +1206,6 @@ r.post(
     try {
       const { contestId } = req.body || {};
 
-      // ALWAYS reset the active contest unless an explicit id is provided
       const active = await ensureActiveContestNow();
       const id = String(contestId || active?.id || "").trim();
       if (!id) return res.status(500).json({ ok: false, error: "Active contest not available." });
@@ -1071,7 +1217,6 @@ r.post(
       const entriesCol = db().collection("entries").doc(id).collection("items");
       const deletedContestEntries = await deleteCollectionInBatches(entriesCol, 400);
 
-      // ALSO wipe winner docs for this contest so Reveal doesn’t keep showing old results
       const winnersQuery = db().collection("winners").where("contestId", "==", id);
       const deletedWinnerRecords = await deleteQueryInBatches(winnersQuery, 400);
 
@@ -1087,12 +1232,10 @@ r.post(
           resolved: false,
           resolvedAt: null,
 
-          // new 4-target flow fields
           resolvedBy: null,
           resolvedSlot: null,
           winner: null,
 
-          // legacy
           targetNumber: null,
 
           targets: {},
@@ -1150,6 +1293,7 @@ r.post(
 
 /* =========================================================
    ADMIN — PAID PREVIEW + RESOLVE (LEGACY)
+   (unchanged below)
 ========================================================= */
 
 async function computePaidWinner({ contestId, targetNumber }) {
@@ -1158,7 +1302,6 @@ async function computePaidWinner({ contestId, targetNumber }) {
   if (!contestSnap.exists) throw new Error("No such contest.");
 
   const contest = contestSnap.data() || {};
-
   const target = parse4DigitNumber(targetNumber);
   if (target == null) throw new Error("Invalid target.");
 
@@ -1305,7 +1448,7 @@ r.post(
 );
 
 /* =========================================================
-   ADMIN — AMOE CONTROLS
+   ADMIN — AMOE CONTROLS (unchanged)
 ========================================================= */
 
 function cleanEmail(s) {
@@ -1340,7 +1483,7 @@ r.post(
       const recv = receivedAt ? Number(receivedAt) : nowMs();
       const { ref: stateRef, state } = await getOrInitAmoeState();
 
-      const status = String(state.status || "COLLECTING");
+      const status = String(state.status || "COLLECTING").toUpperCase();
       if (status === "RESOLVED") {
         return res.status(400).json({ error: "AMOE cycle is resolved. Reset cycle to start again." });
       }
@@ -1376,7 +1519,7 @@ r.post(
           createdAt: nowMs(),
         });
 
-      // Mirror into ACTIVE contest pool (this is what makes it “claim” a number)
+      // Mirror into ACTIVE contest pool
       const active = await ensureActiveContestNow();
       if (active?.id) {
         await db()
@@ -1406,14 +1549,15 @@ r.post(
 
       const nextCount = Number(state.count || 0) + 1;
 
-      const patch = {
-        count: nextCount,
-        status: "COLLECTING",
-        updatedAt: nowMs(),
-        prizeCents: Number(state.prizeCents || AMOE_PRIZE_CENTS),
-      };
-
-      await stateRef.set(patch, { merge: true });
+      await stateRef.set(
+        {
+          count: nextCount,
+          status: "COLLECTING",
+          updatedAt: nowMs(),
+          prizeCents: Number(state.prizeCents || AMOE_PRIZE_CENTS),
+        },
+        { merge: true }
+      );
 
       await auditLog(
         "admin_amoe_add",
@@ -1421,23 +1565,50 @@ r.post(
         req
       );
 
-      return res.json({
-        ok: true,
-        cycleId,
-        entryId: entryDoc.id,
-        count: nextCount,
-        status: "COLLECTING",
-      });
+      return res.json({ ok: true, cycleId, entryId: entryDoc.id, count: nextCount, status: "COLLECTING" });
     } catch (e) {
       return res.status(500).json({ error: e.message || "Failed to add AMOE entry." });
     }
   }
 );
 
-// ... rest of your file continues unchanged ...
+r.post(
+  "/api/admin/amoe/reset-cycle",
+  requireAdmin,
+  rateLimit({ routeKey: "admin_amoe_reset_cycle", limit: 10, windowMs: 15 * 60 * 1000 }),
+  async (req, res) => {
+    try {
+      const { ref: stateRef, state } = await getOrInitAmoeState();
+      const curCycleId = Number(state.cycleId || 1);
+
+      const nextCycle = curCycleId + 1;
+
+      await stateRef.set(
+        {
+          cycleId: nextCycle,
+          status: "COLLECTING",
+          count: 0,
+          reachedAt: null,
+          resolvedAt: null,
+          targetNumber: null,
+          prizeCents: AMOE_PRIZE_CENTS,
+          updatedAt: nowMs(),
+        },
+        { merge: true }
+      );
+
+      await auditLog("admin_amoe_reset_cycle", { amoePrevCycleId: curCycleId, amoeNextCycleId: nextCycle }, req);
+
+      return res.json({ ok: true, amoePrevCycleId: curCycleId, amoeNextCycleId: nextCycle });
+    } catch (e) {
+      return res.status(500).json({ error: e.message || "Failed to reset AMOE cycle." });
+    }
+  }
+);
 
 /* =========================================================
    ADMIN — EXPORTS (PAID + AMOE)
+   (unchanged; still useful, but master rollover returns auditPack now)
 ========================================================= */
 
 r.post(
@@ -1492,12 +1663,12 @@ r.post(
           bonusPrizeCents: bonus,
           finalPrizeCents: finalPrize,
 
-          // include reg fields if present
-          registrationOpenAt: contest.registrationOpenAt ?? null,
-          registrationCloseAt: contest.registrationCloseAt ?? null,
-          registrationWindowEnabled: !!contest.registrationWindowEnabled,
-          registrationWindowSource: contest.registrationWindowSource || "DEFAULT",
-          registrationWindowUpdatedAt: contest.registrationWindowUpdatedAt ?? null,
+          startMs: contest.startMs ?? null,
+          endMs: contest.endMs ?? null,
+          manualWindowEnabled: !!contest.manualWindowEnabled,
+          manualStartMs: contest.manualStartMs ?? null,
+          manualEndMs: contest.manualEndMs ?? null,
+          manualWindowUpdatedAt: contest.manualWindowUpdatedAt ?? null,
         },
         winner,
         entriesCountTotal: entries.length,
