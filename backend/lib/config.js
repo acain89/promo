@@ -27,10 +27,23 @@ export const TOKEN_TTL_SECONDS = 30 * 60;
 export const CHICAGO_TZ = "America/Chicago";
 export const CUTOFF_WEEKDAY_SHORT = "Sat";
 
-// Clamp cutoff inputs to avoid bad env values causing weird behavior
-export const CUTOFF_HOUR_24 = Math.max(0, Math.min(23, Number(process.env.CUTOFF_HOUR_24 ?? 21)));
-export const CUTOFF_MINUTE = Math.max(0, Math.min(59, Number(process.env.CUTOFF_MINUTE ?? 30)));
+// ✅ DEFAULT CLOSE TIME: Saturday 9:00 AM (Chicago time)
+// Overrideable via env vars:
+//   CUTOFF_HOUR_24 (0–23)
+//   CUTOFF_MINUTE (0–59)
 
+const RAW_CUTOFF_HOUR = Number(process.env.CUTOFF_HOUR_24);
+const RAW_CUTOFF_MIN = Number(process.env.CUTOFF_MINUTE);
+
+export const CUTOFF_HOUR_24 = Math.max(
+  0,
+  Math.min(23, Number.isFinite(RAW_CUTOFF_HOUR) ? RAW_CUTOFF_HOUR : 9)
+);
+
+export const CUTOFF_MINUTE = Math.max(
+  0,
+  Math.min(59, Number.isFinite(RAW_CUTOFF_MIN) ? RAW_CUTOFF_MIN : 0)
+);
 // Unpaid entry expiration
 export const UNPAID_EXPIRE_MS = Number(process.env.UNPAID_EXPIRE_MS ?? 2 * 60 * 60 * 1000);
 

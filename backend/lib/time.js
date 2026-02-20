@@ -55,6 +55,29 @@ function floorToMinute(ms) {
   return Math.floor(ms / 60000) * 60000;
 }
 
+function msFromParts(days, hours, minutes) {
+  return ((days * 24 + hours) * 60 + minutes) * 60000;
+}
+
+/* =========================================================
+   DEFAULT SCHEDULE
+   - Close: Saturday 9:00 AM (cutoffAt)
+   - Reopen: Saturday 10:30 PM (startMs)
+   - So each contest "registration open" window is:
+       startMs = cutoffAt - 6 days 10 hours 30 minutes
+       endMs   = cutoffAt
+========================================================= */
+
+const DEFAULT_OPEN_WINDOW_MS = msFromParts(6, 10, 30); // 6d 10h 30m
+
+function defaultStartMsFromCutoff(cutoffAtMs) {
+  return Number(cutoffAtMs) - DEFAULT_OPEN_WINDOW_MS;
+}
+
+function defaultEndMsFromCutoff(cutoffAtMs) {
+  return Number(cutoffAtMs);
+}
+
 /* =========================================================
    CUTOFF LOGIC
    NOTE: Make weekday matching resilient to config casing/format.
@@ -108,6 +131,86 @@ export function cutoffForEntryMs(entryMs) {
 }
 
 /* =========================================================
+   REGISTRATION WINDOW (DEFAULT + MANUAL OVERRIDE)
+========================================================= */
+
+export function getRegistrationWindow(contest) {
+  if (!contest) return { startMs: null, endMs: null, source: "none" };
+
+  const manualEnabled = contest.manualWindowEnabled === true;
+  const mStart = Number(contest.manualStartMs || 0);
+  const mEnd = Number(contest.manualEndMs || 0);
+
+  if (manualEnabled && Number.isFinite(mStart) && Number.isFinite(mEnd) && mStart > 0 && mEnd > mStart) {
+    return { startMs: mStart, endMs: mEnd, source: "manual" };
+  }
+
+  const cutoffAt = Number(contest.cutoffAt || 0);
+  if (!Number.isFinite(cutoffAt) || cutoffAt <= 0) return { startMs: null, endMs: null, source: "none" };
+
+  const startMs = Number(contest.startMs || 0) || defaultStartMsFromCutoff(cutoffAt);
+  const endMs = Number(contest.endMs || 0) || defaultEndMsFromCutoff(cutoffAt);
+
+  return { startMs, endMs, source: "default" };
+}
+
+export function isRegistrationOpenAt(contest, atMs) {
+  const t = Number(atMs || 0);
+  if (!contest) return false;
+  if (contest.resolved) return false;
+
+  const { startMs, endMs } = getRegistrationWindow(contest);
+  if (!startMs || !endMs) return false;
+
+  return t >= startMs && t < endMs;
+}
+
+/**
+ * Update (or clear) manual window override on a contest.
+ * Use this in your admin route:
+ * - enable override: setManualRegistrationWindow(contestId, startMs, endMs, true)
+ * - disable override: setManualRegistrationWindow(contestId, null, null, false)
+ */
+export async function setManualRegistrationWindow(contestId, startMs, endMs, enabled) {
+  const id = String(contestId || "").trim();
+  if (!id) throw new Error("Missing contestId.");
+
+  const ref = db().collection("contests").doc(id);
+
+  if (!enabled) {
+    await ref.set(
+      {
+        manualWindowEnabled: false,
+        manualStartMs: null,
+        manualEndMs: null,
+        manualWindowUpdatedAt: nowMs(),
+      },
+      { merge: true }
+    );
+    return { ok: true, manualWindowEnabled: false };
+  }
+
+  const s = Number(startMs || 0);
+  const e = Number(endMs || 0);
+
+  if (!Number.isFinite(s) || !Number.isFinite(e) || s <= 0 || e <= s) {
+    throw new Error("Invalid start/end.");
+  }
+
+  await ref.set(
+    {
+      manualWindowEnabled: true,
+      manualStartMs: s,
+      manualEndMs: e,
+      manualWindowUpdatedAt: nowMs(),
+    },
+    { merge: true }
+  );
+
+  return { ok: true, manualWindowEnabled: true, manualStartMs: s, manualEndMs: e };
+}
+
+/* =========================================================
    PUBLIC PRIZE CONFIG (config/public)
    - Admin can set weeklyGuaranteedPrizeCents + weeklyBonusPrizeCents
 ========================================================= */
@@ -150,6 +253,9 @@ export async function ensureContestForCutoff(cutoffAtMs) {
   const contestRef = db().collection("contests").doc(contestId);
   const snap = await contestRef.get();
 
+  const defaultStartMs = defaultStartMsFromCutoff(cutoffAtMs);
+  const defaultEndMs = defaultEndMsFromCutoff(cutoffAtMs);
+
   if (!snap.exists) {
     const { guaranteedPrizeCents, bonusPrizeCents } = await getWeeklyPrizeDefaults();
     const finalPrizeCents = Number(guaranteedPrizeCents || 0) + Number(bonusPrizeCents || 0);
@@ -160,6 +266,16 @@ export async function ensureContestForCutoff(cutoffAtMs) {
 
       cutoffAt: cutoffAtMs,
       endsOn,
+
+      // ✅ registration window defaults (Sat 10:30pm reopen → Sat 9:00am close)
+      startMs: defaultStartMs,
+      endMs: defaultEndMs,
+
+      // manual override fields (off by default)
+      manualWindowEnabled: false,
+      manualStartMs: null,
+      manualEndMs: null,
+      manualWindowUpdatedAt: null,
 
       resolved: false,
       resolvedAt: null,
@@ -198,6 +314,8 @@ export async function ensureContestForCutoff(cutoffAtMs) {
       mode: "DAILY4",
       cutoffAt: cutoffAtMs,
       endsOn,
+      startMs: defaultStartMs,
+      endMs: defaultEndMs,
       resolved: false,
       resolvedAt: null,
       entryCount: 0,
@@ -208,7 +326,18 @@ export async function ensureContestForCutoff(cutoffAtMs) {
     };
   }
 
-  return snap.data();
+  // If contest exists, ensure startMs/endMs are present (do not overwrite manual overrides)
+  const existing = snap.data() || {};
+  const patch = {};
+  if (!existing.startMs) patch.startMs = defaultStartMs;
+  if (!existing.endMs) patch.endMs = defaultEndMs;
+
+  if (Object.keys(patch).length) {
+    await contestRef.set(patch, { merge: true });
+    return { ...existing, ...patch };
+  }
+
+  return existing;
 }
 
 /**
@@ -298,6 +427,8 @@ export async function getContestForEntryTime(entryMs) {
 export function safeContestForClient(contest) {
   if (!contest) return { serverNow: nowMs(), ok: false };
 
+  const win = getRegistrationWindow(contest);
+
   return {
     ok: true,
     serverNow: nowMs(),
@@ -305,8 +436,15 @@ export function safeContestForClient(contest) {
     mode: contest.mode || "DAILY4",
     cutoffAt: contest.cutoffAt ?? null,
     endsOn: contest.endsOn ?? null,
+
+    // ✅ send window to clients so countdown is consistent everywhere
+    startMs: win.startMs ?? null,
+    endMs: win.endMs ?? null,
+    windowSource: win.source,
+
     resolved: !!contest.resolved,
     resolvedAt: contest.resolvedAt ?? null,
+
     entryCount: Number(contest.entryCount || 0),
     guaranteedPrizeCents: Number(contest.guaranteedPrizeCents || 0),
     bonusPrizeCents: Number(contest.bonusPrizeCents || 0),

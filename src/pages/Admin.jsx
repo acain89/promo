@@ -148,6 +148,12 @@ function WinnerModal({ open, onClose, data }) {
   const playedAt = wr?.playedAt ?? data?.playedAt ?? pw?.playedAt ?? null;
   const stamp = wr?.resolvedAt ?? data?.serverNow ?? Date.now();
 
+  const resolvedBy = String(
+    wr?.resolvedBy || data?.finalizedBy || (wr?.exact ? "EXACT" : "") || ""
+  ).toUpperCase();
+
+  const headline = resolvedBy === "CLOSEST" ? "Closest Match — Winner" : "Exact Match — Winner";
+
   return (
     <div
       style={{
@@ -197,7 +203,7 @@ function WinnerModal({ open, onClose, data }) {
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
           <div style={{ display: "grid", gap: 2 }}>
             <div style={{ fontSize: 10, letterSpacing: "0.18em", textTransform: "uppercase", opacity: 0.75 }}>
-              Exact Match — Winner
+              {headline}
             </div>
             <div style={{ fontSize: 22, fontWeight: 950 }}>{un}</div>
           </div>
@@ -295,6 +301,34 @@ function WinnerModal({ open, onClose, data }) {
   );
 }
 
+/* =========================
+   Helpers for datetime-local
+========================= */
+
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+// datetime-local expects "YYYY-MM-DDTHH:MM"
+function msToLocalInput(ms) {
+  if (!ms) return "";
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return "";
+  const yyyy = d.getFullYear();
+  const mm = pad2(d.getMonth() + 1);
+  const dd = pad2(d.getDate());
+  const hh = pad2(d.getHours());
+  const mi = pad2(d.getMinutes());
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+}
+
+function localInputToMs(v) {
+  const s = String(v || "").trim();
+  if (!s) return null;
+  const ms = new Date(s).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
 export default function Admin() {
   const [unlocked, setUnlocked] = useState(false);
   const [status, setStatus] = useState("");
@@ -339,7 +373,15 @@ export default function Admin() {
   const [resetBusy, setResetBusy] = useState(false);
   const [resetErr, setResetErr] = useState("");
 
+  // ✅ SCHEDULE / REGISTRATION WINDOW
+  const [schedStart, setSchedStart] = useState("");
+  const [schedEnd, setSchedEnd] = useState("");
+  const [schedBusy, setSchedBusy] = useState(false);
+  const [schedErr, setSchedErr] = useState("");
+
   const active = state?.activeContest || null;
+  const startMs = Number(active?.startMs ?? active?.start ?? 0) || 0;
+  const endMs = Number(active?.endMs ?? active?.end ?? 0) || 0;
 
   const totalPaidCents = Number(state?.stats?.totalPaidCents || 0);
 
@@ -406,6 +448,16 @@ export default function Admin() {
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unlocked]);
+
+  // When state loads, populate schedule fields (best-effort)
+  useEffect(() => {
+    if (!unlocked) return;
+    const sMs = active?.startMs ?? active?.start ?? null;
+    const eMs = active?.endMs ?? active?.end ?? null;
+    if (sMs) setSchedStart(msToLocalInput(sMs));
+    if (eMs) setSchedEnd(msToLocalInput(eMs));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unlocked, active?.id]);
 
   async function withBusy(fn) {
     if (busy) return;
@@ -500,6 +552,7 @@ export default function Admin() {
 
     await withBusy(async () => {
       let didSetBusy = false;
+
       try {
         setStatus("");
         setErr("");
@@ -523,11 +576,13 @@ export default function Admin() {
         // Always refresh state after submit
         await refresh();
 
-        // Exact match -> show winner popup
-        if (r?.exactHit) {
+        // Finalize (EXACT or CLOSEST on slot 4) -> show winner popup
+        if (r?.finalized) {
           setWinnerData({ ...r, serverNow: Date.now() });
           setWinnerOpen(true);
-          setStatus("Exact match found. Contest resolved.");
+
+          const by = String(r?.finalizedBy || (r?.exactHit ? "EXACT" : "DONE")).toUpperCase();
+          setStatus(`Contest resolved (${by}).`);
         } else {
           setStatus(`Target #${slot} locked. Projected winner updated (if improved).`);
         }
@@ -681,6 +736,62 @@ export default function Admin() {
     });
   }
 
+  // ✅ Schedule actions
+  function computeRegOpen() {
+    const now = Number(state?.serverNow || Date.now());
+    const startMs = Number(active?.startMs ?? active?.start ?? 0);
+    const endMs = Number(active?.endMs ?? active?.end ?? 0);
+    const resolved = !!active?.resolved;
+    if (!startMs || !endMs) return null; // unknown
+    if (resolved) return false;
+    return now >= startMs && now < endMs;
+  }
+
+  async function saveWindow() {
+    if (schedBusy) return;
+
+    const contestId = String(active?.id || "").trim();
+    const startMs = localInputToMs(schedStart);
+    const endMs = localInputToMs(schedEnd);
+
+    try {
+      setSchedBusy(true);
+      setSchedErr("");
+      setStatus("");
+      setErr("");
+
+      if (!contestId) throw new Error("Missing contestId.");
+      if (!startMs || !endMs) throw new Error("Start and End are required.");
+      if (endMs <= startMs) throw new Error("End must be after Start.");
+
+      const confirmText =
+        `SET Registration Window?\n\n` +
+        `Start: ${formatTS(startMs)}\n` +
+        `End:   ${formatTS(endMs)}\n\n` +
+        `This controls when PAID entries are allowed.\nProceed?`;
+
+      if (!window.confirm(confirmText)) return;
+
+      await apiPost("/api/admin/contest/window", { contestId, startMs, endMs });
+      setStatus("Window updated.");
+      await refresh();
+    } catch (e) {
+      setSchedErr(errMsg(e, "Failed to set window."));
+    } finally {
+      setSchedBusy(false);
+    }
+  }
+
+  async function startNow() {
+    const now = Number(state?.serverNow || Date.now());
+    setSchedStart(msToLocalInput(now - 5000));
+  }
+
+  async function endNow() {
+    const now = Number(state?.serverNow || Date.now());
+    setSchedEnd(msToLocalInput(now));
+  }
+
   const pageStyle = {
     minHeight: "100svh",
     width: "100%",
@@ -761,6 +872,8 @@ export default function Admin() {
   const slotLocked = (slot) => !!targets?.[String(slot)]?.locked;
   const slotInfo = (slot) => targets?.[String(slot)] || null;
 
+  const regOpen = computeRegOpen();
+
   return (
     <main className="adminPage" style={pageStyle}>
       <div className="adminCard" style={{ ...cardStyle, position: "relative" }}>
@@ -819,6 +932,77 @@ export default function Admin() {
           <section style={panelStyle}>
             <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
               Paid Weekly Game
+            </div>
+
+            {/* ✅ Registration Window */}
+            <div
+              style={{
+                padding: "10px 12px",
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,0.10)",
+                background: "rgba(255,255,255,0.01)",
+                marginBottom: 10,
+              }}
+            >
+              <div className="label" style={{ textAlign: "center", marginBottom: 8 }}>
+                Registration Window (Paid Entries)
+              </div>
+
+              <div style={{ display: "grid", gap: 8 }}>
+                <div style={compactRow}>
+                  <span className="label">Server Time</span>
+                  <span className="value">{formatTS(state?.serverNow || null)}</span>
+                </div>
+
+                <div style={compactRow}>
+                  <span className="label">Registration</span>
+                  <span className="value">
+                    {regOpen == null ? "—" : regOpen ? "OPEN" : "CLOSED"}
+                  </span>
+                </div>
+
+                <div style={{ display: "grid", gap: 8, marginTop: 6 }}>
+                  <label className="label" style={{ opacity: 0.85 }}>
+                    Start (local)
+                  </label>
+                  <input
+                    className="field"
+                    type="datetime-local"
+                    value={schedStart}
+                    onChange={(e) => setSchedStart(e.target.value)}
+                    disabled={busy || schedBusy}
+                  />
+
+                  <label className="label" style={{ opacity: 0.85 }}>
+                    End (local)
+                  </label>
+                  <input
+                    className="field"
+                    type="datetime-local"
+                    value={schedEnd}
+                    onChange={(e) => setSchedEnd(e.target.value)}
+                    disabled={busy || schedBusy}
+                  />
+
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginTop: 4 }}>
+                    <button className="secondary" onClick={startNow} disabled={busy || schedBusy}>
+                      Start Now
+                    </button>
+                    <button className="secondary" onClick={endNow} disabled={busy || schedBusy}>
+                      End Now
+                    </button>
+                    <button className="primary" onClick={saveWindow} disabled={busy || schedBusy}>
+                      {schedBusy ? "Saving…" : "Save Window"}
+                    </button>
+                  </div>
+
+                  <div className="miniMuted" style={{ textAlign: "center" }}>
+                    This controls when Stripe checkout is allowed. Backend must enforce it.
+                  </div>
+
+                  {schedErr ? <div style={{ color: "#ffb2b2", fontSize: 13, textAlign: "center" }}>{schedErr}</div> : null}
+                </div>
+              </div>
             </div>
 
             {/* Daily4-only indicator */}
@@ -885,6 +1069,20 @@ export default function Admin() {
                   <span className="label">Resolved</span>
                   <span className="value">{resolved ? "YES" : "NO"}</span>
                 </div>
+
+                {/* Optional fields if backend provides them */}
+                {active?.startMs ? (
+                  <div style={compactRow}>
+                    <span className="label">Start</span>
+                    <span className="value">{formatTS(active.startMs)}</span>
+                  </div>
+                ) : null}
+                {active?.endMs ? (
+                  <div style={compactRow}>
+                    <span className="label">End</span>
+                    <span className="value">{formatTS(active.endMs)}</span>
+                  </div>
+                ) : null}
               </div>
 
               {projected ? (

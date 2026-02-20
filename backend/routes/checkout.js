@@ -70,9 +70,25 @@ function toUpper(s) {
 }
 
 function isRetryablePaidStatus(statusUpper) {
-  // ✅ These are "paid but not counted" situations in checkoutConfirm.
-  // We allow a new checkout attempt, but we preserve the prior payment ids for refund/admin tracking.
   return statusUpper === "DUPLICATE" || statusUpper === "QUEUED";
+}
+
+/**
+ * ✅ Registration window enforcement (Paid entries only)
+ * - contest must exist + not resolved
+ * - if start/end exist -> enforce [start, end)
+ * - if start/end missing -> fallback open (back-compat)
+ */
+function isRegistrationOpen(contest, now) {
+  if (!contest || contest.resolved) return false;
+
+  const startMs = Number(contest.startMs ?? contest.start ?? 0);
+  const endMs = Number(contest.endMs ?? contest.end ?? 0);
+
+  // Back-compat: if not configured, do not block paid entries
+  if (!startMs || !endMs) return true;
+
+  return now >= startMs && now < endMs;
 }
 
 /* =========================================================
@@ -82,9 +98,8 @@ function isRetryablePaidStatus(statusUpper) {
    - ✅ Allow changing guess BEFORE payment
    - ✅ Include deterministic entryId in session metadata
    - ✅ Enforce "first to pay (or AMOE already entered) claims the number"
-   - ✅ If prior paid status is DUPLICATE/QUEUED (paid but not counted), allow retry:
-        - preserve prior payment refs for refund
-        - reset to unpaid + PENDING_PAYMENT for new attempt
+   - ✅ Enforce registration window (Paid-only)
+   - ✅ If prior paid status is DUPLICATE/QUEUED (paid but not counted), allow retry
 ========================================================= */
 
 r.post(
@@ -109,6 +124,15 @@ r.post(
       const contest = await ensureActiveContestNow();
       if (!contest || contest.resolved) {
         return res.status(400).json({ error: "Contest unavailable." });
+      }
+
+      // ✅ window enforcement (fast fail)
+      const now = nowMs();
+      if (!isRegistrationOpen(contest, now)) {
+        return res.status(409).json({
+          code: "REG_CLOSED",
+          error: "Registration is closed. Registration reopens after current game is complete.",
+        });
       }
 
       /* ---------------------------
@@ -141,20 +165,8 @@ r.post(
 
       const contestRef = db().collection("contests").doc(contest.id);
 
-      const now = nowMs();
-
       /* =====================================================
          ENTRY CREATION / REUSE LOGIC (transactional)
-
-         Rules:
-         - Only ONE entry per contest per user
-         - Guess is changeable BEFORE payment
-         - Unpaid + expired → allow retry
-         - Unpaid + not expired → touch / reuse
-         - ✅ Enforce: you cannot start checkout for a guess that is already claimed
-         - ✅ If entry is PAID+COUNTED => hard stop (entered)
-         - ✅ If entry is PAID but status is DUPLICATE/QUEUED (paid but NOT counted):
-              allow retry by resetting to unpaid PENDING_PAYMENT, preserving prior payment refs
 ========================================================= */
 
       let checkoutAttempt = 1;
@@ -164,8 +176,17 @@ r.post(
       await db().runTransaction(async (tx) => {
         const [contestSnap, existingSnap] = await Promise.all([tx.get(contestRef), tx.get(entryRef)]);
         if (!contestSnap.exists) throw new Error("Contest unavailable.");
+
         const c = contestSnap.data() || {};
         if (c.resolved) throw new Error("Contest unavailable.");
+
+        // ✅ window enforcement INSIDE tx (race-proof)
+        const nowTx = nowMs();
+        if (!isRegistrationOpen(c, nowTx)) {
+          const err = new Error("REG_CLOSED");
+          err.code = "REG_CLOSED";
+          throw err;
+        }
 
         // If user already has an entry
         if (existingSnap.exists) {
@@ -181,7 +202,6 @@ r.post(
 
           // Paid but NOT counted — only allow retry for known retryable statuses
           if (entry.paid === true && !alreadyCounted && !isRetryablePaidStatus(statusUpper)) {
-            // safest default: treat as entered (prevents accidental double-charge paths)
             throw new Error("You already entered this contest.");
           }
 
@@ -190,14 +210,13 @@ r.post(
           checkoutAttempt = Number(entry.checkoutAttempt || 1);
 
           const touched = Number(entry.lastTouchedAt || entry.retryAt || entry.timestamp || 0);
-          const ageMs = now - touched;
+          const ageMs = nowTx - touched;
           const isExpired =
             statusUpper === "EXPIRED" || (Number.isFinite(ageMs) && ageMs > UNPAID_EXPIRE_MS);
 
           const shouldReset =
             guessChanged ||
             isExpired ||
-            // ✅ if they previously hit DUPLICATE/QUEUED, we *always* reset so they can proceed cleanly
             (entry.paid === true && !alreadyCounted && isRetryablePaidStatus(statusUpper));
 
           if (shouldReset) {
@@ -220,8 +239,8 @@ r.post(
               guess: normalizedGuess,
 
               status: "PENDING_PAYMENT",
-              retryAt: now,
-              lastTouchedAt: now,
+              retryAt: nowTx,
+              lastTouchedAt: nowTx,
 
               checkoutAttempt,
 
@@ -238,7 +257,6 @@ r.post(
 
               // ensure we're not accidentally “claimed”
               countedInContest: false,
-              // keep countedAt if you want a history, but it should already be null/absent in these cases
               countedAt: entry.countedAt ?? null,
 
               // Clear any prior duplicate markers
@@ -249,7 +267,7 @@ r.post(
             // Still pending (same guess): touch it so it doesn't expire while user is actively trying
             tx.update(entryRef, {
               status: "PENDING_PAYMENT",
-              lastTouchedAt: now,
+              lastTouchedAt: nowTx,
             });
           }
 
@@ -269,8 +287,8 @@ r.post(
           userId: req.user.id,
           username,
           guess: normalizedGuess,
-          timestamp: now,
-          lastTouchedAt: now,
+          timestamp: nowTx,
+          lastTouchedAt: nowTx,
           type: "PAID",
           paid: false,
           paidAt: null,
@@ -278,6 +296,10 @@ r.post(
           stripeSessionId: null,
           paymentIntentId: null,
           checkoutAttempt: 1,
+
+          // ✅ optional: snapshot window fields for audit/debug
+          regStartMs: Number(c.startMs ?? c.start ?? 0) || null,
+          regEndMs: Number(c.endMs ?? c.end ?? 0) || null,
         });
 
         checkoutAttempt = 1;
@@ -365,20 +387,31 @@ r.post(
         contestEndsOn: contest.endsOn || null,
       });
     } catch (e) {
-      const msg = String(e?.message || "Checkout failed.");
+      const rawMsg = String(e?.message || "Checkout failed.");
+      const code = String(e?.code || "").trim();
+
+      // ✅ explicit reg-closed handling
+      if (rawMsg === "REG_CLOSED" || code === "REG_CLOSED") {
+        return res.status(409).json({
+          code: "REG_CLOSED",
+          error: "Registration is closed. Registration reopens after current game is complete.",
+        });
+      }
 
       // Clean UX for expected user-facing rejections
-      const lower = msg.toLowerCase();
+      const lower = rawMsg.toLowerCase();
       if (
         lower.includes("not available") ||
         lower.includes("already entered") ||
         lower.includes("contest unavailable") ||
-        lower.includes("invalid number")
+        lower.includes("invalid number") ||
+        lower.includes("not configured") ||
+        lower.includes("front end url")
       ) {
-        return res.status(400).json({ error: msg });
+        return res.status(400).json({ error: rawMsg });
       }
 
-      return res.status(500).json({ error: msg });
+      return res.status(500).json({ error: rawMsg });
     }
   }
 );
