@@ -22,6 +22,10 @@
   --radius-sm:10px;
   --shadow-soft:0 14px 40px rgba(0,0,0,0.45);
 
+  --reveal-accent:#18f2d5;
+  --reveal-accent-soft:rgba(24,242,213,0.16);
+  --reveal-accent-glow:rgba(24,242,213,0.34);
+
   /* =======================================================
      UNIFIED PANEL SIZE (matches Past Winners feel)
      - Every panel: fixed "mobile screen" size
@@ -562,4 +566,91 @@ section{
   margin: 16px 0;
 }
 
+/* =========================================================
+   REVEAL — VISUAL ENERGY UPGRADES
+========================================================= */
 
+.revealNumbers{
+  display:flex;
+  justify-content:center;
+  gap:10px;
+  margin:10px 0 18px;
+}
+
+.revealNum{
+  min-width:56px;
+  height:56px;
+  border-radius:14px;
+  display:grid;
+  place-items:center;
+
+  font-size:1.35rem;
+  font-weight:800;
+
+  background:var(--bg-soft);
+  border:1px solid var(--reveal-accent-soft);
+
+  box-shadow:
+    0 0 0 1px rgba(24,242,213,0.12),
+    0 10px 18px rgba(0,0,0,0.35),
+    0 0 14px var(--reveal-accent-glow);
+
+  animation:revealPop 420ms ease-out both;
+}
+
+.revealNum:nth-child(2){ animation-delay:70ms; }
+.revealNum:nth-child(3){ animation-delay:140ms; }
+.revealNum:nth-child(4){ animation-delay:210ms; }
+
+@keyframes revealPop{
+  from{
+    opacity:0;
+    transform:scale(0.92) translateY(6px);
+  }
+  to{
+    opacity:1;
+    transform:scale(1) translateY(0);
+  }
+}
+
+.projectedWinner{
+  border:1px solid var(--reveal-accent-soft);
+  background:rgba(24,242,213,0.05);
+  animation:projectedPulse 3.2s ease-in-out infinite;
+}
+
+@keyframes projectedPulse{
+  0%,100%{ box-shadow:0 0 10px rgba(24,242,213,0.10); }
+  50%{ box-shadow:0 0 18px rgba(24,242,213,0.20); }
+}
+
+.winnerBlock{
+  border:1px solid rgba(24,242,213,0.60);
+  background:rgba(24,242,213,0.10);
+
+  transform:scale(1.02);
+
+  box-shadow:
+    0 0 0 1px rgba(24,242,213,0.18),
+    0 14px 30px rgba(0,0,0,0.42),
+    0 0 24px rgba(24,242,213,0.30);
+
+  animation:winnerFloat 4s ease-in-out infinite;
+}
+
+@keyframes winnerFloat{
+  0%,100%{ transform:scale(1.02) translateY(0); }
+  50%{ transform:scale(1.02) translateY(-2px); }
+}
+
+.winnerBlock .winnerTitle{
+  color:var(--reveal-accent);
+  font-weight:900;
+  letter-spacing:0.06em;
+  text-transform:uppercase;
+}
+
+.revealCard:hover{
+  transform:translateY(-2px);
+  transition:transform 180ms ease;
+}

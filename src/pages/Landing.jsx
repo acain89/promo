@@ -137,10 +137,23 @@ export default function Landing() {
   // Optional backend flags (if/when you add them). Fallback keeps UX usable now.
   const playStatus = String(contest?.playStatus || "").toUpperCase(); // OPEN | CLOSED | QUEUED | etc.
   const playOpen = typeof contest?.playOpen === "boolean" ? contest.playOpen : true;
-  const enterDisabled = loading || !playOpen || playStatus === "CLOSED";
+
+  // Treat "closed" as: backend explicitly closed, OR playOpen false.
+  const isClosed = !playOpen || playStatus === "CLOSED";
+
+  // ✅ IMPORTANT: button should NEVER be dead just because entry is closed.
+  // When closed: CTA becomes "View Results" and routes to /reveal.
+  const ctaLabel = isClosed ? "View Results" : "Enter";
+  const ctaDisabled = loading; // only disable while loading (not based on timer)
 
   function onEnter() {
-    if (enterDisabled) return;
+    if (loading) return;
+
+    if (isClosed) {
+      nav("/reveal");
+      return;
+    }
+
     nav(authed ? "/profile" : "/join");
   }
 
@@ -175,12 +188,11 @@ export default function Landing() {
   };
 
   // Live stats (safe fallbacks)
-  const livePlayers =
-    Number.isFinite(Number(contest?.entryCount))
-      ? Number(contest?.entryCount)
-      : Number.isFinite(Number(contest?.playerCount))
-        ? Number(contest?.playerCount)
-        : 0;
+  const livePlayers = Number.isFinite(Number(contest?.entryCount))
+    ? Number(contest?.entryCount)
+    : Number.isFinite(Number(contest?.playerCount))
+      ? Number(contest?.playerCount)
+      : 0;
 
   function toCentsMaybe(v) {
     const n = Number(v);
@@ -310,7 +322,9 @@ export default function Landing() {
             {formatDDHHMMSS(remaining)}
           </div>
 
-          <div style={{ ...infoTextStyle, marginTop: -6 }}>Time left to lock in your submission.</div>
+          <div style={{ ...infoTextStyle, marginTop: -6 }}>
+            {isClosed ? "Entry is closed. Results are available on Reveal." : "Time left to lock in your submission."}
+          </div>
 
           <div className="form" style={{ marginTop: 4 }}>
             <div style={{ display: "flex", gap: 10, width: "100%" }}>
@@ -325,8 +339,8 @@ export default function Landing() {
               </div>
             </div>
 
-            <button className="primary" onClick={onEnter} disabled={enterDisabled} style={{ marginTop: 10 }}>
-              Enter
+            <button className="primary" onClick={onEnter} disabled={ctaDisabled} style={{ marginTop: 10 }}>
+              {ctaLabel}
             </button>
 
             <button className="secondary" onClick={openHow} disabled={loading}>
@@ -334,7 +348,7 @@ export default function Landing() {
             </button>
           </div>
 
-          {playStatus === "CLOSED" ? (
+          {isClosed ? (
             <div className="miniMuted" style={{ textAlign: "center", opacity: 0.75, lineHeight: 1.25 }}>
               Entry is currently closed. Entries submitted during the closed window are queued for the next contest.
             </div>
@@ -376,7 +390,7 @@ export default function Landing() {
           >
             <div
               style={{
-                fontSize: 16,
+                fontSize: 18,
                 fontWeight: 900,
                 letterSpacing: "0.08em",
                 color: "var(--accent)",
@@ -389,23 +403,25 @@ export default function Landing() {
             <div style={{ marginTop: 12, opacity: 0.92, lineHeight: 1.4, fontSize: 16 }}>
               <ol style={{ margin: 0, paddingLeft: 20 }}>
                 <li>Choose and lock in a 4-digit number (0000–9999).</li>
+                <li>Entries close when the timer hits zero.</li>
+                <li>We use the official Texas Daily 4 draws: Morning, Day, Evening, Night.</li>
                 <li>Each number can only be claimed once per week.</li>
-                <li>Exact match on any Saturday draw? You win instantly.</li>
-                <li>If no exact match occurs, the closest number wins.</li>
+                <li>Exact match on any draw? You win instantly.</li>
+                <li>If no exact match occurs, the closest number wins after the Night draw.</li>
                 <li>One winner. One prize. Every week.</li>
               </ol>
+            </div>
 
-              <div style={{ display: "flex", justifyContent: "center", marginTop: 14 }}>
-                <button
-                  ref={okBtnRef}
-                  type="button"
-                  className="primary"
-                  onClick={closeHow}
-                  style={{ padding: "10px 18px", minWidth: 120 }}
-                >
-                  OK
-                </button>
-              </div>
+            <div style={{ display: "flex", justifyContent: "center", marginTop: 14 }}>
+              <button
+                ref={okBtnRef}
+                type="button"
+                className="primary"
+                onClick={closeHow}
+                style={{ padding: "10px 18px", minWidth: 120 }}
+              >
+                OK
+              </button>
             </div>
           </div>
         </div>

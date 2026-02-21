@@ -14,12 +14,8 @@ const r = Router();
  * - Verifies session is paid
  * - Marks entry PAID (or QUEUED if contest already resolved)
  * - Increments contest entryCount (exactly once)
- * - ✅ Enforces "first to pay (or AMOE already entered) claims the number"
- *
- * Claim definition:
- * - A number is "claimed" if there exists ANY OTHER entry in the same contest
- *   with the same normalized guess AND countedInContest === true.
- *   (AMOE mirror entries set countedInContest=true, and paid confirms set it true too.)
+ * - ✅ Enforces "first to be COUNTED claims the number" via a deterministic guess index doc:
+ *     entries/{contestId}/guessIndex/{GUESS4}
  *
  * If Stripe is paid but the number was already claimed by someone else:
  * - We DO NOT increment contest entryCount
@@ -72,7 +68,9 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
       .doc(finalEntryId);
 
     const contestRef = db().collection("contests").doc(finalContestId);
-    const entriesCol = db().collection("entries").doc(finalContestId).collection("items");
+
+    // ✅ Deterministic guess index lives under entries/{contestId}/guessIndex/{GUESS4}
+    const guessIndexCol = db().collection("entries").doc(finalContestId).collection("guessIndex");
 
     let changed = false;
     let appliedContestIncrement = false;
@@ -99,15 +97,18 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
       if (d.length !== 4) throw new Error("Entry guess is missing/invalid for this session.");
       const guessNorm = normalizeNumber(Number(d), 4);
 
+      const guessIndexRef = guessIndexCol.doc(String(guessNorm));
+
       // If contest is resolved, do NOT count toward entryCount; mark queued (but still mark paid)
       if (contest.resolved) {
         queued = true;
 
-        // Mark paid (idempotent), but keep this out of the contest count
         tx.update(entryRef, {
           paid: true,
           paidAt: alreadyPaid ? entry.paidAt ?? nowMs() : nowMs(),
           status: "QUEUED",
+
+          // do not count once resolved
           countedInContest: alreadyCounted ? true : false,
           countedAt: alreadyCounted ? entry.countedAt ?? null : null,
 
@@ -123,47 +124,43 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
         return;
       }
 
-      // Uniqueness enforcement ONLY when we would newly count this entry.
-      // If this entry is already counted, let confirm be idempotent.
-      if (!alreadyCounted) {
-        const q = entriesCol
-          .where("guess", "==", guessNorm)
-          .where("countedInContest", "==", true)
-          .limit(2);
+      /**
+       * ✅ Hard uniqueness: if we are about to count this entry (or ensure it stays counted),
+       * the guessIndex doc must either:
+       * - not exist (we can create it), OR
+       * - exist and belong to THIS entryId (idempotent success)
+       */
+      const idxSnap = await tx.get(guessIndexRef);
+      if (idxSnap.exists) {
+        const idx = idxSnap.data() || {};
+        const ownerEntryId = String(idx.entryId || "").trim();
+        if (ownerEntryId && ownerEntryId !== finalEntryId) {
+          duplicate = true;
+          claimedByEntryId = ownerEntryId;
 
-        const qSnap = await tx.get(q);
+          // Paid, but NOT counted. (Admin can refund if desired.)
+          tx.update(entryRef, {
+            paid: true,
+            paidAt: alreadyPaid ? entry.paidAt ?? nowMs() : nowMs(),
+            status: "DUPLICATE",
 
-        if (!qSnap.empty) {
-          const other = qSnap.docs.find((doc) => doc.id !== finalEntryId);
-          if (other) {
-            duplicate = true;
-            claimedByEntryId = other.id;
+            countedInContest: false,
+            countedAt: entry.countedAt ?? null,
 
-            // Stripe is paid, but the number is already claimed by someone else.
-            // Record as paid but NOT counted (admin can refund if desired).
-            tx.update(entryRef, {
-              paid: true,
-              paidAt: alreadyPaid ? entry.paidAt ?? nowMs() : nowMs(),
-              status: "DUPLICATE",
+            duplicateOfEntryId: ownerEntryId,
+            duplicateGuess: guessNorm,
 
-              countedInContest: false,
-              countedAt: entry.countedAt ?? null,
+            stripeSessionId: session.id || entry.stripeSessionId || null,
+            paymentIntentId: paymentIntentId || entry.paymentIntentId || null,
+            lastTouchedAt: nowMs(),
 
-              duplicateOfEntryId: other.id,
-              duplicateGuess: guessNorm,
+            guess: guessNorm,
+          });
 
-              stripeSessionId: session.id || entry.stripeSessionId || null,
-              paymentIntentId: paymentIntentId || entry.paymentIntentId || null,
-              lastTouchedAt: nowMs(),
-
-              // keep guess normalized
-              guess: guessNorm,
-            });
-
-            changed = true;
-            return;
-          }
+          changed = true;
+          return;
         }
+        // If ownerEntryId === finalEntryId, we’re good (idempotent).
       }
 
       // Mark entry paid (idempotent) and normalize guess
@@ -179,7 +176,6 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
         });
         changed = true;
       } else {
-        // keep it clean/idempotent, and ensure status isn't left weird if it's counted
         const curStatus = String(entry.status || "").toUpperCase();
         const statusPatch = alreadyCounted && curStatus !== "PAID" ? { status: "PAID" } : {};
 
@@ -192,13 +188,36 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
         });
       }
 
-      // Apply entryCount increment EXACTLY ONCE
+      // Apply entryCount increment EXACTLY ONCE, and claim the guess index EXACTLY ONCE
       if (!alreadyCounted) {
+        // Create/claim the guess index first (or ensure it’s ours)
+        if (!idxSnap.exists) {
+          tx.create(guessIndexRef, {
+            entryId: finalEntryId,
+            contestId: finalContestId,
+            guess: guessNorm,
+            source: "PAID",
+            createdAt: nowMs(),
+          });
+        } else {
+          // idx exists and belongs to us (or has empty owner) -> ensure it points to us
+          tx.set(
+            guessIndexRef,
+            {
+              entryId: finalEntryId,
+              contestId: finalContestId,
+              guess: guessNorm,
+              source: "PAID",
+              updatedAt: nowMs(),
+            },
+            { merge: true }
+          );
+        }
+
         tx.update(contestRef, {
           entryCount: admin.firestore.FieldValue.increment(1),
         });
 
-        // IMPORTANT: when we count it, it is officially claimed
         tx.update(entryRef, {
           countedInContest: true,
           countedAt: nowMs(),
@@ -207,6 +226,30 @@ r.get("/api/checkout/confirm", requireUser, async (req, res) => {
 
         appliedContestIncrement = true;
         changed = true;
+      } else {
+        // Already counted: best-effort ensure the guessIndex exists and is owned by us
+        if (!idxSnap.exists) {
+          tx.create(guessIndexRef, {
+            entryId: finalEntryId,
+            contestId: finalContestId,
+            guess: guessNorm,
+            source: "PAID",
+            createdAt: nowMs(),
+            recovered: true,
+          });
+          changed = true;
+        } else {
+          const idx = idxSnap.data() || {};
+          const ownerEntryId = String(idx.entryId || "").trim();
+          if (!ownerEntryId) {
+            tx.set(
+              guessIndexRef,
+              { entryId: finalEntryId, contestId: finalContestId, guess: guessNorm, source: "PAID", updatedAt: nowMs() },
+              { merge: true }
+            );
+            changed = true;
+          }
+        }
       }
     });
 

@@ -221,6 +221,27 @@ async function hasAnyEntryWithEmailInContest(contestId, emailLower) {
   return !q2.empty;
 }
 
+/**
+ * ✅ Block duplicate 4-digit guesses within a single contest (paid + mirrored AMOE)
+ * NOTE: kept for compatibility; "guessIndex" is the real hard lock.
+ */
+async function hasAnyEntryWithGuessInContest(contestId, guessNorm4) {
+  const col = db().collection("entries").doc(contestId).collection("items");
+
+  // Current canonical storage appears to be "guess" as 4-char string.
+  const q1 = await col.where("guess", "==", guessNorm4).limit(1).get();
+  if (!q1.empty) return true;
+
+  return false;
+}
+
+function emailKeyFromLower(emLower) {
+  return String(emLower || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^\w.-]/g, "_");
+}
+
 /* =========================================================
    STATS — LIFETIME "TOTAL PAID OUT"
 ========================================================= */
@@ -356,8 +377,6 @@ async function setPrizeConfig({ weeklyGuaranteedPrizeCents, weeklyBonusPrizeCent
 
 /* =========================================================
    AUDIT EXPORT PACK (MASTER EXPORT)
-   - contest snapshot + winner record + all contest entries
-   - AMOE state + AMOE entries for the current cycle
 ========================================================= */
 
 async function getWinnerRecordForContest(contestId) {
@@ -375,18 +394,14 @@ async function getWinnerRecordForContest(contestId) {
 async function buildAuditPack({ contestId, amoeCycleId }) {
   const serverNow = nowMs();
 
-  // contest
   const contestSnap = await db().collection("contests").doc(contestId).get();
   const contest = contestSnap.exists ? contestSnap.data() || {} : null;
 
-  // entries under contest pool (paid + mirrored AMOE)
   const entriesSnap = await db().collection("entries").doc(contestId).collection("items").get();
   const entries = entriesSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
 
-  // winner record
   const winnerRecord = await getWinnerRecordForContest(contestId);
 
-  // AMOE state + entries for that cycle
   const { state: amoeState } = await getOrInitAmoeState();
   const cycleId = Number(amoeCycleId || amoeState.cycleId || 1);
 
@@ -400,7 +415,9 @@ async function buildAuditPack({ contestId, amoeCycleId }) {
     .limit(1)
     .get();
 
-  const amoeWinner = amoeWinnerSnap.empty ? null : { id: amoeWinnerSnap.docs[0].id, ...amoeWinnerSnap.docs[0].data() };
+  const amoeWinner = amoeWinnerSnap.empty
+    ? null
+    : { id: amoeWinnerSnap.docs[0].id, ...amoeWinnerSnap.docs[0].data() };
 
   const totalPaidCents = await getTotalPaidCents();
   const prizeCfg = await getPrizeConfig();
@@ -430,7 +447,6 @@ async function buildAuditPack({ contestId, amoeCycleId }) {
           endsOn: contest.endsOn ?? null,
           activatedAt: contest.activatedAt ?? null,
 
-          // schedule fields
           startMs: contest.startMs ?? null,
           endMs: contest.endMs ?? null,
           manualWindowEnabled: !!contest.manualWindowEnabled,
@@ -438,20 +454,17 @@ async function buildAuditPack({ contestId, amoeCycleId }) {
           manualEndMs: contest.manualEndMs ?? null,
           manualWindowUpdatedAt: contest.manualWindowUpdatedAt ?? null,
 
-          // resolve fields
           resolved: !!contest.resolved,
           resolvedAt: contest.resolvedAt ?? null,
           resolvedBy: contest.resolvedBy ?? null,
           resolvedSlot: contest.resolvedSlot ?? null,
 
-          // targets + winner/projection
-          targetNumber: contest.targetNumber ?? null, // legacy
+          targetNumber: contest.targetNumber ?? null,
           targets: contest.targets ?? {},
           targetsUpdatedAt: contest.targetsUpdatedAt ?? null,
           projectedWinner: contest.projectedWinner ?? null,
           winner: contest.winner ?? null,
 
-          // prize
           entryCount: Number(contest.entryCount || 0),
           guaranteedPrizeCents: guaranteed,
           bonusPrizeCents: bonus,
@@ -801,6 +814,10 @@ async function computeUnifiedBest({ contestId, targetNumber }) {
   };
 }
 
+/* =========================================================
+   TARGET SUBMIT (unchanged)
+========================================================= */
+
 r.post(
   "/api/admin/targets/submit",
   requireAdmin,
@@ -883,6 +900,9 @@ r.post(
           patch.resolvedSlot = s;
 
           patch.targetNumber = exactHit ? r0.targetNorm : projectedWinner?.target ?? r0.targetNorm;
+
+          // NOTE: prize snapshot is added after resolve (outside tx) when we build the winners record.
+          // We still keep patch.winner as the best-known winner snapshot for Reveal UI.
           patch.winner = projectedWinner || null;
         }
 
@@ -946,6 +966,9 @@ r.post(
           bonusPrizeCents: bonus,
           finalPrizeCents: finalPrize,
 
+          // ✅ KEY FIX: canonical "what winner won" field for UI
+          prizeCents: finalPrize,
+
           resolvedAt: nowMs(),
           eligibleCount: result.eligibleCount,
           totalEntries: result.totalEntries,
@@ -953,6 +976,20 @@ r.post(
 
         await db().collection("winners").add(record);
         await trimByResolvedAt("winners", HISTORY_LIMIT);
+
+        // ✅ Also store prize snapshot into the contest winner snapshot (so Reveal UI always has it)
+        try {
+          const winnerSnapshot = {
+            ...(contest.winner || proj || null),
+            prizeCents: finalPrize,
+            guaranteedPrizeCents: guaranteed,
+            bonusPrizeCents: bonus,
+            finalPrizeCents: finalPrize,
+          };
+          await db().collection("contests").doc(result.contestId).set({ winner: winnerSnapshot }, { merge: true });
+        } catch {
+          // best-effort
+        }
 
         await auditLog(
           "admin_targets_finalize",
@@ -963,6 +1000,7 @@ r.post(
             winnerUN: record.winnerUN,
             target: record.target,
             diff: record.diff,
+            prizeCents: record.prizeCents,
           },
           req
         );
@@ -985,47 +1023,7 @@ r.post(
 
 /* =========================================================
    ✅ MASTER ROLLOVER: ADMIN — SCHEDULE COMMIT
-   Payload:
-     { startMs, endMs }
-   Behavior:
-     - exports FULL audit pack for the contest being ended + current AMOE cycle
-     - resolves current contest if needed (ADMIN_ROLLOVER)
-     - creates/activates next contest using endMs as cutoffAt
-     - applies manual window on new contest
-     - advances contest/current pointer
-     - resets AMOE cycle (increments cycleId; does NOT delete history)
 ========================================================= */
-
-async function resolveContestAdminRollover(contestId, req) {
-  const id = String(contestId || "").trim();
-  if (!id) throw new Error("Missing contestId.");
-
-  const ref = db().collection("contests").doc(id);
-
-  await db().runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
-    if (!snap.exists) throw new Error("No such contest.");
-
-    const c = snap.data() || {};
-    if (c.resolved) return; // idempotent
-
-    tx.set(
-      ref,
-      {
-        mode: "DAILY4",
-        resolved: true,
-        resolvedAt: nowMs(),
-        resolvedBy: "ADMIN_ROLLOVER",
-        resolvedSlot: 0,
-        // do NOT fabricate a winner
-        winner: null,
-      },
-      { merge: true }
-    );
-  });
-
-  await auditLog("admin_contest_resolve_admin_rollover", { contestId: id }, req);
-}
 
 async function pointCurrentContest(contest) {
   const now = nowMs();
@@ -1044,6 +1042,11 @@ async function pointCurrentContest(contest) {
     );
 }
 
+/**
+ * ✅ AMOE resets whenever the timer/game lifecycle is reset (schedule commit)
+ * - increments global cycleId (used for amoeEntries/{cycleId})
+ * - does NOT delete history
+ */
 async function resetAmoeCycle(req) {
   const { ref: stateRef, state } = await getOrInitAmoeState();
   const curCycleId = Number(state.cycleId || 1);
@@ -1113,10 +1116,9 @@ r.post(
       await ensureActiveContestNow();
 
       // ---------- NEXT CONTEST ----------
-      const nextCutoff =
-      Number(active.cutoffAt || 0) + (7 * 24 * 60 * 60 * 1000);
+      const nextCutoff = Number(active.cutoffAt || 0) + 7 * 24 * 60 * 60 * 1000;
 
-      const next = await ensureContestForCutoff(nextCutoff);      
+      const next = await ensureContestForCutoff(nextCutoff);
       if (!next?.id) throw new Error("Next contest missing.");
 
       await setManualRegistrationWindow(next.id, s, e, true);
@@ -1145,31 +1147,15 @@ r.post(
       await pointCurrentContest(next);
       await ensureActiveContestNow();
 
-      // ---------- AMOE NEW CYCLE ----------
-      const amoeNext = Number(amoeState.cycleId || 1) + 1;
-
-      await db()
-        .collection("amoe")
-        .doc("state")
-        .set(
-          {
-            cycleId: amoeNext,
-            status: "COLLECTING",
-            count: 0,
-            reachedAt: null,
-            resolvedAt: null,
-            targetNumber: null,
-            prizeCents: AMOE_PRIZE_CENTS,
-            updatedAt: nowMs(),
-          },
-          { merge: true }
-        );
+      // ---------- AMOE NEW CYCLE (RESET ON TIMER RESET) ----------
+      const amoeRoll = await resetAmoeCycle(req);
 
       return res.json({
         ok: true,
         prevContestId: active.id,
         nextContestId: next.id,
         auditPack,
+        ...amoeRoll,
       });
     } catch (e) {
       return res.status(400).json({ error: e.message || "commit failed" });
@@ -1215,7 +1201,6 @@ r.post(
 
 /* =========================================================
    ADMIN — RESET (WIPE PAID + AMOE ENTRIES)
-   NOTE: kept, but you may no longer NEED this once UI is simplified.
 ========================================================= */
 
 r.post(
@@ -1236,6 +1221,16 @@ r.post(
 
       const entriesCol = db().collection("entries").doc(id).collection("items");
       const deletedContestEntries = await deleteCollectionInBatches(entriesCol, 400);
+
+      // ✅ IMPORTANT: also wipe uniqueness indexes so "reset-all" truly resets
+      const deletedGuessIndex = await deleteCollectionInBatches(
+        db().collection("entries").doc(id).collection("guessIndex"),
+        400
+      );
+      const deletedEmailIndex = await deleteCollectionInBatches(
+        db().collection("entries").doc(id).collection("emailIndex"),
+        400
+      );
 
       const winnersQuery = db().collection("winners").where("contestId", "==", id);
       const deletedWinnerRecords = await deleteQueryInBatches(winnersQuery, 400);
@@ -1288,6 +1283,8 @@ r.post(
         {
           contestId: id,
           deletedContestEntries,
+          deletedGuessIndex,
+          deletedEmailIndex,
           deletedWinnerRecords,
           deletedAmoeEntries,
           amoePrevCycleId: curCycleId,
@@ -1300,6 +1297,8 @@ r.post(
         ok: true,
         contestId: id,
         deletedContestEntries,
+        deletedGuessIndex,
+        deletedEmailIndex,
         deletedWinnerRecords,
         deletedAmoeEntries,
         amoePrevCycleId: curCycleId,
@@ -1313,7 +1312,6 @@ r.post(
 
 /* =========================================================
    ADMIN — PAID PREVIEW + RESOLVE (LEGACY)
-   (unchanged below)
 ========================================================= */
 
 async function computePaidWinner({ contestId, targetNumber }) {
@@ -1391,6 +1389,7 @@ r.post(
         guaranteedPrizeCents: guaranteed,
         bonusPrizeCents: bonus,
         finalPrizeCents: finalPrize,
+        prizeCents: finalPrize, // ✅ convenience
       });
     } catch (e) {
       return res.status(400).json({ error: e.message || "Preview failed." });
@@ -1433,6 +1432,10 @@ r.post(
         guaranteedPrizeCents: guaranteed,
         bonusPrizeCents: bonus,
         finalPrizeCents: finalPrize,
+
+        // ✅ KEY FIX: canonical field for Past Winners UI
+        prizeCents: finalPrize,
+
         resolvedAt: nowMs(),
         entryTimestamp: r0.winner.timestamp,
         eligibleCount: r0.eligibleCount,
@@ -1451,13 +1454,31 @@ r.post(
           guaranteedPrizeCents: guaranteed,
           bonusPrizeCents: bonus,
           finalPrizeCents: finalPrize,
+
+          // ✅ store winner snapshot for Reveal UI consistency
+          winner: {
+            winnerUN: record.winnerUN,
+            winnerUserId: record.winnerUserId,
+            guess: record.guess,
+            diff: record.diff,
+            exact: record.exact,
+            target: record.target,
+            drawLabel: null,
+            playedAt: record.resolvedAt,
+            entryTimestamp: record.entryTimestamp,
+            updatedAt: record.resolvedAt,
+            prizeCents: finalPrize,
+            guaranteedPrizeCents: guaranteed,
+            bonusPrizeCents: bonus,
+            finalPrizeCents: finalPrize,
+          },
         },
         { merge: true }
       );
 
       await auditLog(
         "admin_resolve_paid",
-        { contestId: contest.id || id, target: record.target, finalPrizeCents: finalPrize },
+        { contestId: contest.id || id, target: record.target, finalPrizeCents: finalPrize, prizeCents: record.prizeCents },
         req
       );
 
@@ -1469,7 +1490,7 @@ r.post(
 );
 
 /* =========================================================
-   ADMIN — AMOE CONTROLS (unchanged)
+   ADMIN — AMOE CONTROLS
 ========================================================= */
 
 function cleanEmail(s) {
@@ -1488,132 +1509,174 @@ r.post(
   rateLimit({ routeKey: "admin_amoe_add", limit: 120, windowMs: 15 * 60 * 1000 }),
   async (req, res) => {
     try {
-  const { name, email, address, guess, receivedAt } = req.body || {};
+      const { name, email, address, guess, receivedAt } = req.body || {};
 
-  const nm = cleanName(name);
-  const em = cleanEmail(email);      // lowercased trimmed
-  const addr = cleanAddr(address);
+      const nm = cleanName(name);
+      const em = cleanEmail(email);
+      const addr = cleanAddr(address);
 
-  if (nm.length < 2) return res.status(400).json({ error: "Name required." });
+      if (nm.length < 2) return res.status(400).json({ error: "Name required." });
+      if (!em.includes("@")) return res.status(400).json({ error: "Valid email required." });
+      if (addr.length < 6) return res.status(400).json({ error: "Address required." });
 
-  // ✅ intentionally loose: allows "@test"
-  if (!em.includes("@")) return res.status(400).json({ error: "Valid email required." });
+      const n = parse4DigitNumber(guess);
+      if (n == null) return res.status(400).json({ error: "Invalid AMOE number. Must be 0000–9999." });
 
-  if (addr.length < 6) return res.status(400).json({ error: "Address required." });
+      const recv = receivedAt ? Number(receivedAt) : nowMs();
 
-  const n = parse4DigitNumber(guess);
-  if (n == null) return res.status(400).json({ error: "Invalid AMOE number. Must be 0000–9999." });
+      const { ref: stateRef, state } = await getOrInitAmoeState();
 
-  const recv = receivedAt ? Number(receivedAt) : nowMs();
+      const status = String(state.status || "COLLECTING").toUpperCase();
+      if (status === "RESOLVED") {
+        return res.status(400).json({ error: "AMOE cycle is resolved. Reset cycle to start again." });
+      }
 
-  const { ref: stateRef, state } = await getOrInitAmoeState();
+      const cycleId = Number(state.cycleId || 1);
+      const guessNorm = normalizeNumber(n, 4);
 
-  const status = String(state.status || "COLLECTING").toUpperCase();
-  if (status === "RESOLVED") {
-    return res.status(400).json({ error: "AMOE cycle is resolved. Reset cycle to start again." });
-  }
+      // ✅ Need ACTIVE contest
+      const active = await ensureActiveContestNow();
+      if (!active?.id) return res.status(500).json({ error: "Active contest not available." });
 
-  const cycleId = Number(state.cycleId || 1);
+      const contestId = active.id;
 
-  // ✅ 1) Block AMOE duplicate within current cycle
-  const dupeAmoeSnap = await db()
-    .collection("amoeEntries")
-    .doc(String(cycleId))
-    .collection("items")
-    .where("emailLower", "==", em)
-    .limit(1)
-    .get();
+      // deterministic index locations (SAME SYSTEM AS PAID CONFIRM)
+      const guessIndexRef = db()
+        .collection("entries")
+        .doc(contestId)
+        .collection("guessIndex")
+        .doc(String(guessNorm));
 
-  if (!dupeAmoeSnap.empty) {
-    return res.status(400).json({ error: "Duplicate AMOE: this email already exists in the current AMOE cycle." });
-  }
+      const emailKey = emailKeyFromLower(em);
+      const emailIndexRef = db()
+        .collection("entries")
+        .doc(contestId)
+        .collection("emailIndex")
+        .doc(emailKey);
 
-  // ✅ 2) Block duplicates vs ANY entry already in the ACTIVE contest (PAID or AMOE)
-  const active = await ensureActiveContestNow();
-  if (!active?.id) return res.status(500).json({ error: "Active contest not available." });
+      // refs
+      const amoeEntryRef = db()
+        .collection("amoeEntries")
+        .doc(String(cycleId))
+        .collection("items")
+        .doc();
 
-  const existsInContest = await hasAnyEntryWithEmailInContest(active.id, em);
-  if (existsInContest) {
-    return res.status(400).json({
-      error: "Duplicate: this email already has an entry in the current contest (AMOE or PAID).",
-    });
-  }
+      const mirrorRef = db().collection("entries").doc(contestId).collection("items").doc();
 
-  // ✅ 3) Create AMOE entry (authoritative record)
-  const guessNorm = normalizeNumber(n, 4);
-  const entryRef = await db()
-    .collection("amoeEntries")
-    .doc(String(cycleId))
-    .collection("items")
-    .add({
-      name: nm,
-      email: em,
-      emailLower: em,
-      address: addr,
-      guess: guessNorm,
-      receivedAt: recv,
-      timestamp: recv,
-      createdAt: nowMs(),
-    });
+      let nextCount = 0;
 
-  // ✅ 4) Mirror into active contest pool + keep mirror id (for admin confirmation)
-  const mirrorRef = await db()
-    .collection("entries")
-    .doc(active.id)
-    .collection("items")
-    .add({
-      paid: false,
-      status: "AMOE",
-      source: "AMOE",
-      isAmoe: true,
-      countedInContest: true,
+      await db().runTransaction(async (tx) => {
+        // ----- state -----
+        const stateSnap = await tx.get(stateRef);
+        const curState = stateSnap.data() || {};
 
-      name: nm,
-      username: nm,
+        // ----- duplicate EMAIL in AMOE cycle -----
+        const dupeAmoeEmailQuery = db()
+          .collection("amoeEntries")
+          .doc(String(cycleId))
+          .collection("items")
+          .where("emailLower", "==", em)
+          .limit(1);
 
-      email: em,
-      emailLower: em,
-      address: addr,
+        const dupeAmoeEmailSnap = await tx.get(dupeAmoeEmailQuery);
+        if (!dupeAmoeEmailSnap.empty) {
+          throw new Error("Duplicate AMOE: this email already exists in the current AMOE cycle.");
+        }
 
-      guess: guessNorm,
+        // ----- AMOE authoritative record -----
+        tx.create(amoeEntryRef, {
+          name: nm,
+          email: em,
+          emailLower: em,
+          address: addr,
+          guess: guessNorm,
+          receivedAt: recv,
+          timestamp: recv,
+          createdAt: nowMs(),
+        });
 
-      timestamp: recv,
-      createdAt: nowMs(),
-      amoeCycleId: cycleId,
-      amoeEntryId: entryRef.id,
-    });
+        // ----- Mirror into contest -----
+        tx.create(mirrorRef, {
+          paid: false,
+          status: "AMOE",
+          source: "AMOE",
+          isAmoe: true,
+          countedInContest: true,
 
-  // ✅ 5) Increment AMOE state count
-  const nextCount = Number(state.count || 0) + 1;
-  await stateRef.set(
-    {
-      count: nextCount,
-      status: "COLLECTING",
-      updatedAt: nowMs(),
-      prizeCents: Number(state.prizeCents || AMOE_PRIZE_CENTS),
-    },
-    { merge: true }
-  );
+          name: nm,
+          username: nm,
 
-  await auditLog(
-    "admin_amoe_add",
-    { cycleId, entryId: entryRef.id, mirrorContestId: active.id, mirrorEntryId: mirrorRef.id, email: em, guess: guessNorm, count: nextCount },
-    req
-  );
+          email: em,
+          emailLower: em,
+          address: addr,
 
-  // ✅ CONFIRMATION payload for UI
-  return res.json({
-    ok: true,
-    status: "RECORDED",
-    cycleId,
-    entryId: entryRef.id,
-    mirrorContestId: active.id,
-    mirrorEntryId: mirrorRef.id,
-    count: nextCount,
-    entry: { name: nm, email: em, address: addr, guess: guessNorm, receivedAt: recv },
-  });
-} catch (e) {
-  return res.status(500).json({ error: e.message || "Failed to add AMOE entry." });
+          guess: guessNorm,
+
+          timestamp: recv,
+          createdAt: nowMs(),
+
+          amoeCycleId: cycleId,
+          amoeEntryId: amoeEntryRef.id,
+        });
+
+        // ✅ 2-line upgrade: hard uniqueness via deterministic docs + tx.create()
+        tx.create(emailIndexRef, {
+          entryId: mirrorRef.id,
+          contestId,
+          email: em,
+          source: "AMOE",
+          createdAt: nowMs(),
+        });
+
+        tx.create(guessIndexRef, {
+          entryId: mirrorRef.id,
+          contestId,
+          guess: guessNorm,
+          source: "AMOE",
+          createdAt: nowMs(),
+        });
+
+        // ----- increment AMOE state -----
+        nextCount = Number(curState.count || 0) + 1;
+
+        tx.set(
+          stateRef,
+          {
+            count: nextCount,
+            status: "COLLECTING",
+            updatedAt: nowMs(),
+            prizeCents: Number(curState.prizeCents || AMOE_PRIZE_CENTS),
+          },
+          { merge: true }
+        );
+      });
+
+      await auditLog(
+        "admin_amoe_add",
+        {
+          cycleId,
+          entryId: amoeEntryRef.id,
+          mirrorContestId: contestId,
+          mirrorEntryId: mirrorRef.id,
+          email: em,
+          guess: guessNorm,
+          count: nextCount,
+        },
+        req
+      );
+
+      return res.json({
+        ok: true,
+        status: "RECORDED",
+        cycleId,
+        entryId: amoeEntryRef.id,
+        mirrorContestId: contestId,
+        mirrorEntryId: mirrorRef.id,
+        count: nextCount,
+        entry: { name: nm, email: em, address: addr, guess: guessNorm, receivedAt: recv },
+      });
+    } catch (e) {
+      return res.status(500).json({ error: e.message || "Failed to add AMOE entry." });
     }
   }
 );
@@ -1654,7 +1717,6 @@ r.post(
 
 /* =========================================================
    ADMIN — EXPORTS (PAID + AMOE)
-   (unchanged; still useful, but master rollover returns auditPack now)
 ========================================================= */
 
 r.post(

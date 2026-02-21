@@ -93,32 +93,51 @@ const ALLOW_HEADERS =
  */
 app.options("*", (req, res) => {
   const origin = req.headers.origin;
-
-  // No origin = not a browser preflight
   if (!origin) return res.sendStatus(204);
 
   const o = normalizeOrigin(origin);
-  if (!allowed.includes(o)) return res.sendStatus(204);
+  if (!allowed.includes(o)) {
+    return res.status(403).send("CORS: Origin not allowed");
+  }
 
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Methods", ALLOW_METHODS);
 
-  // Echo requested headers if present, but ALWAYS ensure x-admin-token is allowed
-  const reqHdrs = String(req.headers["access-control-request-headers"] || "").trim();
-  if (reqHdrs) {
-    // If the browser asked for headers, reply with them PLUS our known essentials.
-    // (Browser compares case-insensitively.)
-    res.setHeader("Access-Control-Allow-Headers", `${reqHdrs}, ${ALLOW_HEADERS}`);
-  } else {
-    res.setHeader("Access-Control-Allow-Headers", ALLOW_HEADERS);
-  }
+  const essentials = [
+    "content-type",
+    "authorization",
+    "x-admin-token",
+    "cache-control",
+    "pragma",
+    "expires",
+  ];
 
+  const requested = String(req.headers["access-control-request-headers"] || "")
+    .split(",")
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
+
+  const merged = Array.from(new Set([...requested, ...essentials]));
+
+  // Return in a conventional casing
+  const allowHeaders = merged
+    .map((h) =>
+      h === "content-type"
+        ? "Content-Type"
+        : h === "authorization"
+        ? "Authorization"
+        : h === "x-admin-token"
+        ? "X-Admin-Token"
+        : h
+    )
+    .join(", ");
+
+  res.setHeader("Access-Control-Allow-Headers", allowHeaders);
   res.setHeader("Access-Control-Max-Age", "86400");
   return res.sendStatus(204);
 });
-
 // Normal CORS for non-OPTIONS requests
 app.use(
   cors({

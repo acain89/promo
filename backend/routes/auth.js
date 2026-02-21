@@ -1,6 +1,7 @@
 // backend/routes/auth.js
 import express from "express";
 import bcrypt from "bcryptjs";
+import nodemailer from "nodemailer";
 
 import { db } from "../lib/firestore.js";
 import { nowMs, parseCookies } from "../lib/utils.js";
@@ -17,7 +18,7 @@ import {
   readResetToken,
 } from "../lib/session.js";
 
-import { SESSION_COOKIE, SESSION_TTL_MS, RESET_TTL_MS } from "../lib/config.js";
+import { SESSION_COOKIE, SESSION_TTL_MS, RESET_TTL_MS, NODE_ENV } from "../lib/config.js";
 
 const r = express.Router();
 
@@ -35,6 +36,83 @@ function okUsername(un) {
 
 function okPassword(pw) {
   return String(pw || "").length >= 8;
+}
+
+/* =========================================================
+   EMAIL (SMTP) — PASSWORD RESET
+========================================================= */
+
+function getFrontendUrl() {
+  // Prefer env, but fallback to a sane default for local dev.
+  const u = String(process.env.FRONTEND_URL || "").trim();
+  return u ? u.replace(/\/+$/, "") : "http://localhost:5173";
+}
+
+function smtpEnabled() {
+  return !!(
+    process.env.SMTP_HOST &&
+    process.env.SMTP_PORT &&
+    process.env.SMTP_USER &&
+    process.env.SMTP_PASS &&
+    process.env.SMTP_FROM
+  );
+}
+
+function makeTransport() {
+  // Create on demand to avoid startup crashes if env isn’t set.
+  const port = Number(process.env.SMTP_PORT || 587);
+  return nodemailer.createTransport({
+    host: String(process.env.SMTP_HOST || ""),
+    port: Number.isFinite(port) ? port : 587,
+    secure: port === 465, // true for 465, false for 587/STARTTLS
+    auth: {
+      user: String(process.env.SMTP_USER || ""),
+      pass: String(process.env.SMTP_PASS || ""),
+    },
+  });
+}
+
+async function sendResetEmail({ toEmail, resetUrl }) {
+  if (!smtpEnabled()) return { ok: false, reason: "SMTP not configured" };
+
+  const transporter = makeTransport();
+
+  const from = String(process.env.SMTP_FROM || "").trim();
+  const subject = "Reset your drawnfray password";
+  const text = `You requested a password reset for drawnfray.
+
+Reset your password here:
+${resetUrl}
+
+This link expires in ${Math.round(RESET_TTL_MS / 60000)} minutes.
+If you didn’t request this, you can ignore this email.`;
+
+  const html = `
+  <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; line-height: 1.45;">
+    <h2 style="margin:0 0 10px;">Reset your drawnfray password</h2>
+    <p style="margin:0 0 10px;">You requested a password reset.</p>
+    <p style="margin:0 0 14px;">
+      <a href="${resetUrl}" style="display:inline-block;padding:10px 14px;border-radius:10px;text-decoration:none;border:1px solid #ccc;">
+        Reset Password
+      </a>
+    </p>
+    <p style="margin:0 0 10px;color:#666;font-size:13px;">
+      This link expires in ${Math.round(RESET_TTL_MS / 60000)} minutes.
+      If you didn’t request this, you can ignore this email.
+    </p>
+    <p style="margin:0;color:#666;font-size:12px;">If the button doesn’t work, copy/paste this link:</p>
+    <p style="margin:6px 0 0;font-size:12px;word-break:break-all;">${resetUrl}</p>
+  </div>`;
+
+  await transporter.sendMail({
+    from,
+    to: toEmail,
+    subject,
+    text,
+    html,
+  });
+
+  return { ok: true };
 }
 
 /** Frontend expects GET /api/me */
@@ -120,10 +198,6 @@ r.post(
 
 /** Frontend expects POST /api/auth/login
  * Accepts username OR email.
- * Supports payloads:
- *  - { username, password }
- *  - { un, pw }  (legacy)
- *  - { email, password }
  */
 r.post(
   "/api/auth/login",
@@ -131,9 +205,7 @@ r.post(
   async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
 
-    const identifierRaw = String(
-      req.body?.username ?? req.body?.un ?? req.body?.email ?? ""
-    ).trim();
+    const identifierRaw = String(req.body?.username ?? req.body?.un ?? req.body?.email ?? "").trim();
     const password = String(req.body?.password ?? req.body?.pw ?? "");
 
     if (!identifierRaw || !password) {
@@ -158,9 +230,7 @@ r.post(
     const doc = snap.docs[0];
     const u = doc.data() || {};
 
-    // Support older field name if it ever existed
     const hash = String(u.pwHash || u.passwordHash || "");
-
     const ok = await bcrypt.compare(password, hash);
     if (!ok) return res.status(401).json({ error: "Invalid credentials." });
 
@@ -169,7 +239,6 @@ r.post(
       exp: nowMs() + SESSION_TTL_MS,
     });
 
-    // ✅ prefer (req,res,token) so cookie flags are correct behind proxy
     setSessionCookie(req, res, token);
 
     await auditLog("auth_login", { userId: doc.id }, req);
@@ -184,10 +253,7 @@ r.post(
 /** Frontend expects POST /api/auth/logout */
 r.post("/api/auth/logout", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
-
-  // ✅ prefer (req,res) so cookie flags match how it was set
   clearSessionCookie(req, res);
-
   return res.json({ ok: true });
 });
 
@@ -197,7 +263,9 @@ r.post("/api/auth/logout", async (req, res) => {
    - Reset.jsx calls POST /api/auth/reset with { token, newPassword }
 ========================================================= */
 
-/** POST /api/auth/forgot { email } -> always returns ok (no enumeration) */
+/** POST /api/auth/forgot { email } -> always returns ok (no enumeration)
+ * ✅ Now actually sends the email reset link.
+ */
 r.post(
   "/api/auth/forgot",
   rateLimit({ routeKey: "forgot", limit: 20, windowMs: 15 * 60 * 1000 }),
@@ -209,7 +277,11 @@ r.post(
       return res.status(400).json({ error: "Enter a valid email." });
     }
 
-    // Do not reveal whether account exists
+    const frontend = getFrontendUrl();
+
+    // Always respond ok (avoid enumeration)
+    let devResetUrl = null;
+
     try {
       const snap = await db().collection("users").where("email", "==", email).limit(1).get();
       if (!snap.empty) {
@@ -221,6 +293,9 @@ r.post(
           exp: nowMs() + RESET_TTL_MS,
         });
 
+        const resetUrl = `${frontend}/reset?token=${encodeURIComponent(token)}`;
+        devResetUrl = resetUrl;
+
         await db().collection("passwordResets").doc(userId).set(
           {
             createdAt: nowMs(),
@@ -231,21 +306,36 @@ r.post(
           { merge: true }
         );
 
-        await auditLog("auth_forgot_issued", { userId }, req);
+        // ✅ send email (best-effort)
+        try {
+          const sent = await sendResetEmail({ toEmail: email, resetUrl });
+          await auditLog(
+            "auth_forgot_issued",
+            { userId, email, sent: !!sent?.ok, reason: sent?.ok ? null : sent?.reason || "unknown" },
+            req
+          );
+        } catch (mailErr) {
+          await auditLog(
+            "auth_forgot_email_failed",
+            { userId, email, error: String(mailErr?.message || mailErr || "mail_failed") },
+            req
+          );
+        }
       }
     } catch {
       // swallow to prevent enumeration / timing differences
+    }
+
+    // In non-production, return the link to speed up testing.
+    if (String(NODE_ENV || "").toLowerCase() !== "production") {
+      return res.json({ ok: true, devResetUrl });
     }
 
     return res.json({ ok: true });
   }
 );
 
-/** POST /api/auth/reset
- * Accepts:
- *  - { token, newPassword }  (frontend Reset.jsx)
- *  - { token, password }     (legacy)
- */
+/** POST /api/auth/reset */
 r.post(
   "/api/auth/reset",
   rateLimit({ routeKey: "reset", limit: 20, windowMs: 15 * 60 * 1000 }),
@@ -290,7 +380,6 @@ r.post(
       exp: nowMs() + SESSION_TTL_MS,
     });
 
-    // ✅ prefer (req,res,token) so cookie flags are correct behind proxy
     setSessionCookie(req, res, sessToken);
 
     return res.json({ ok: true });

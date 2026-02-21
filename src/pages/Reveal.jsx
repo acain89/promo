@@ -156,17 +156,33 @@ function computeMyDfts(guess, draws) {
   return out;
 }
 
+const REVEAL_ACCENT = "#18f2d5";
+const REVEAL_SOFT = "rgba(24,242,213,0.16)";
+const REVEAL_BG = "rgba(24,242,213,0.06)";
+const REVEAL_GLOW = "rgba(24,242,213,0.28)";
+
 function StatPill({ label, value }) {
+  const isBlank = !value || value === "—";
+
   return (
     <div
       style={{
-        borderRadius: 12,
-        padding: "10px 12px",
-        background: "rgba(255,255,255,0.04)",
-        border: "1px solid rgba(255,255,255,0.08)",
-        minHeight: 54,
+        borderRadius: 14,
+        padding: "12px 12px",
+        minHeight: 60,
         display: "grid",
         alignContent: "center",
+
+        // NEW: always “gamey” even when blank
+        background: isBlank ? "rgba(18,24,34,0.55)" : "rgba(18,24,34,0.70)",
+        border: isBlank ? `1px solid rgba(24,242,213,0.22)` : `1px solid rgba(24,242,213,0.44)`,
+
+        boxShadow: isBlank
+          ? "0 10px 18px rgba(0,0,0,0.30), 0 0 10px rgba(24,242,213,0.10)"
+          : `0 10px 18px rgba(0,0,0,0.32), 0 0 16px ${REVEAL_GLOW}`,
+
+        // Soft “pending” pulse only when blank (subtle)
+        animation: isBlank ? "revealPending 2.8s ease-in-out infinite" : "none",
       }}
     >
       <div
@@ -174,16 +190,31 @@ function StatPill({ label, value }) {
           fontSize: 10,
           letterSpacing: "0.16em",
           textTransform: "uppercase",
-          opacity: 0.7,
+          opacity: 0.85,
+          color: "rgba(231,235,243,0.78)",
         }}
       >
         {label}
       </div>
-      <div style={{ fontSize: 16, fontWeight: 900, marginTop: 2 }}>{value}</div>
+
+      <div
+        style={{
+          fontSize: 18,
+          fontWeight: 950,
+          marginTop: 3,
+          letterSpacing: "0.06em",
+          color: "#ffffff",
+          textShadow: isBlank ? "0 0 8px rgba(24,242,213,0.10)" : "0 0 12px rgba(24,242,213,0.20)",
+          fontVariantNumeric: "tabular-nums",
+          fontFeatureSettings: '"tnum" 1',
+          opacity: isBlank ? 0.78 : 1,
+        }}
+      >
+        {value}
+      </div>
     </div>
   );
 }
-
 function Row({ label, value }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", gap: 10, lineHeight: 1.1 }}>
@@ -394,6 +425,24 @@ export default function Reveal() {
 
   const paidResolved = !!state?.paid?.resolved;
 
+  const winnerBoxStyle = paidResolved
+    ? {
+        padding: "14px 14px",
+        borderRadius: 14,
+        border: `1px solid rgba(24,242,213,0.55)`,
+        background: "rgba(24,242,213,0.10)",
+        boxShadow:
+          "0 14px 30px rgba(0,0,0,0.42), 0 0 24px rgba(24,242,213,0.26), 0 0 0 1px rgba(24,242,213,0.14)",
+        transform: "scale(1.01)",
+      }
+    : {
+        padding: "14px 14px",
+        borderRadius: 14,
+        border: `1px solid rgba(24,242,213,0.22)`,
+        background: "rgba(24,242,213,0.05)",
+        boxShadow: "0 0 16px rgba(24,242,213,0.10)",
+      };
+
   return (
     <PanelShell
       label=""
@@ -479,22 +528,30 @@ export default function Reveal() {
         </div>
 
         {/* Section 5: Winner/Projected Winner */}
-        <div
-          style={{
-            padding: "14px 14px",
-            borderRadius: 14,
-            border: "1px solid rgba(255,255,255,0.10)",
-            background: "rgba(255,255,255,0.02)",
-          }}
-        >
-          <div className="label" style={{ textAlign: "center", marginBottom: 10 }}>
+        <div className={paidResolved ? "winnerBlock" : "projectedWinner"} style={winnerBoxStyle}>
+          <div
+            className="label"
+            style={{
+              textAlign: "center",
+              marginBottom: 10,
+              color: paidResolved ? REVEAL_ACCENT : "rgba(231,235,243,0.62)",
+              opacity: paidResolved ? 1 : 0.85,
+            }}
+          >
             {paidResolved ? "Winner" : "Projected Winner"}
           </div>
 
           {proj ? (
             <div style={{ display: "grid", gap: 10 }}>
               <div style={{ textAlign: "center" }}>
-                <div style={{ fontSize: "1.25rem", fontWeight: 950, letterSpacing: "0.02em" }}>
+                <div
+                  style={{
+                    fontSize: "1.25rem",
+                    fontWeight: 950,
+                    letterSpacing: "0.02em",
+                    textShadow: paidResolved ? "0 0 14px rgba(24,242,213,0.18)" : "none",
+                  }}
+                >
                   {proj.username}
                 </div>
               </div>
@@ -507,7 +564,9 @@ export default function Reveal() {
 
                 <div style={{ display: "flex", justifyContent: "space-between" }}>
                   <span className="label">DFT</span>
-                  <span className="value">{proj.bestDft ?? "—"}</span>
+                  <span className="value" style={{ color: proj?.bestDft === 0 ? REVEAL_ACCENT : "inherit" }}>
+                    {proj.bestDft ?? "—"}
+                  </span>
                 </div>
 
                 <div style={{ display: "flex", justifyContent: "space-between" }}>
@@ -532,7 +591,7 @@ export default function Reveal() {
                 ) : null}
               </div>
 
-              <div className="miniMuted" style={{ opacity: 0.8, textAlign: "center" }}>
+              <div className="miniMuted" style={{ opacity: 0.85, textAlign: "center" }}>
                 {paidResolved ? "Final winner is locked." : "Updates automatically as draw results are entered."}
               </div>
             </div>
@@ -547,11 +606,13 @@ export default function Reveal() {
 
         {/* Section 6: My Status */}
         <div
+          className="myStatusBlock"
           style={{
             padding: "14px 14px",
             borderRadius: 14,
-            border: "1px solid rgba(255,255,255,0.10)",
-            background: "rgba(255,255,255,0.01)",
+            border: `1px solid ${REVEAL_SOFT}`,
+            background: REVEAL_BG,
+            boxShadow: `0 0 14px rgba(24,242,213,0.08)`,
           }}
         >
           <div className="label" style={{ textAlign: "center", marginBottom: 10 }}>
@@ -572,12 +633,13 @@ export default function Reveal() {
               style={{
                 borderRadius: 12,
                 border: "1px solid rgba(255,255,255,0.10)",
-                background: "rgba(255,255,255,0.02)",
-                padding: 8,
+                background: "rgba(18,24,34,0.40)",
+                padding: 10,
                 display: "grid",
                 gap: 3,
                 fontSize: 13,
                 lineHeight: 1.1,
+                boxShadow: "0 10px 18px rgba(0,0,0,0.24)",
               }}
             >
               <Row label="UN:" value={myUsername} />
@@ -592,7 +654,10 @@ export default function Reveal() {
               <Row label="DFT Evening:" value={dftLine("evening")} />
               <Row label="DFT Night:" value={dftLine("night")} />
 
-              <Row label="Current Winner:" value={isCurrentWinner === null ? "" : isCurrentWinner ? "Yes" : "No"} />
+              <Row
+                label="Current Winner:"
+                value={isCurrentWinner === null ? "" : isCurrentWinner ? "Yes" : "No"}
+              />
             </div>
           )}
         </div>
