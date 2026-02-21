@@ -796,8 +796,8 @@ r.post(
   async (req, res) => {
     try {
       const { contestId, slot, targetNumber } = req.body || {};
-      const id = pickContestIdOrLast(contestId);
-
+      const active = await ensureActiveContestNow();
+      const id = contestId ? String(contestId) : active.id;
       const s = clampInt(slot, 1, 4);
       if (s == null) throw new Error("Invalid slot. Must be 1–4.");
 
@@ -1067,92 +1067,100 @@ r.post(
       const s = parseMs(startMs);
       const e = parseMs(endMs);
 
-      if (!s || !e) throw new Error("Invalid startMs/endMs.");
-      if (e <= s) throw new Error("endMs must be after startMs.");
+      if (!s || !e) throw new Error("Invalid start/end.");
+      if (e <= s) throw new Error("end must be after start.");
 
-      // Guardrail: don't allow instantly-expired windows
-      if (e <= nowMs() + 15_000) throw new Error("endMs must be in the future.");
-
-      // Identify the contest being ended + AMOE cycle being exported
+      // ---------- CURRENT CONTEST ----------
       const active = await ensureActiveContestNow();
-      if (!active?.id) throw new Error("Active contest not available.");
+      if (!active?.id) throw new Error("Active contest missing.");
 
       const { state: amoeState } = await getOrInitAmoeState();
-      const exportCycleId = Number(amoeState.cycleId || 1);
 
-      // 1) Build FULL audit pack BEFORE touching anything
-      const auditPack = await buildAuditPack({ contestId: active.id, amoeCycleId: exportCycleId });
+      // ---------- EXPORT BEFORE CHANGES ----------
+      const auditPack = await buildAuditPack({
+        contestId: active.id,
+        amoeCycleId: amoeState.cycleId,
+      });
 
-      // 2) Resolve current contest if not already resolved (do not overwrite true winners)
-      await resolveContestAdminRollover(active.id, req);
+      // ---------- FORCE RESOLVE ----------
+      await db()
+        .collection("contests")
+        .doc(active.id)
+        .set(
+          {
+            resolved: true,
+            resolvedAt: nowMs(),
+            resolvedBy: "ADMIN_ROLLOVER",
+            resolvedSlot: 0,
+            winner: null,
+          },
+          { merge: true }
+        );
 
-      // 3) Create/ensure the next contest based on the cutoff you set (endMs)
-      const next = await ensureContestForCutoff(e);
-      if (!next?.id) throw new Error("Next contest not available.");
+      // IMPORTANT: force lifecycle refresh
+      await ensureActiveContestNow();
 
-      // 4) Apply manual override on next contest (source of truth fields)
+      // ---------- NEXT CONTEST ----------
+      const nextCutoff =
+      Number(active.cutoffAt || 0) + (7 * 24 * 60 * 60 * 1000);
+
+      const next = await ensureContestForCutoff(nextCutoff);      
+      if (!next?.id) throw new Error("Next contest missing.");
+
       await setManualRegistrationWindow(next.id, s, e, true);
 
-      // Also mirror startMs/endMs for older codepaths (harmless)
-      try {
-        await db()
-          .collection("contests")
-          .doc(next.id)
-          .set(
-            {
-              mode: "DAILY4",
-              startMs: s,
-              endMs: e,
-              windowUpdatedAt: nowMs(),
-              // ensure a clean slate explicitly (even though new contests already are)
-              resolved: false,
-              resolvedAt: null,
-              resolvedBy: null,
-              resolvedSlot: null,
-              winner: null,
-              targetNumber: null,
-              targets: {},
-              projectedWinner: null,
-              targetsUpdatedAt: null,
-              entryCount: 0,
-            },
-            { merge: true }
-          );
-      } catch {}
+      await db()
+        .collection("contests")
+        .doc(next.id)
+        .set(
+          {
+            mode: "DAILY4",
+            startMs: s,
+            endMs: e,
+            resolved: false,
+            resolvedAt: null,
+            resolvedBy: null,
+            resolvedSlot: null,
+            winner: null,
+            targetNumber: null,
+            targets: {},
+            projectedWinner: null,
+            entryCount: 0,
+          },
+          { merge: true }
+        );
 
-      // 5) Point contest/current to next so the whole site flips immediately
-      await pointCurrentContest({ ...next, mode: next.mode || "DAILY4" });
+      await pointCurrentContest(next);
+      await ensureActiveContestNow();
 
-      // 6) Roll AMOE cycle so new week starts clean (history remains)
-      const amoeRollover = await resetAmoeCycle(req);
+      // ---------- AMOE NEW CYCLE ----------
+      const amoeNext = Number(amoeState.cycleId || 1) + 1;
 
-      await auditLog(
-        "admin_schedule_commit_master",
-        {
-          prevContestId: active.id,
-          nextContestId: next.id,
-          manualStartMs: s,
-          manualEndMs: e,
-          exportedAmoeCycleId: exportCycleId,
-          ...amoeRollover,
-        },
-        req
-      );
+      await db()
+        .collection("amoe")
+        .doc("state")
+        .set(
+          {
+            cycleId: amoeNext,
+            status: "COLLECTING",
+            count: 0,
+            reachedAt: null,
+            resolvedAt: null,
+            targetNumber: null,
+            prizeCents: AMOE_PRIZE_CENTS,
+            updatedAt: nowMs(),
+          },
+          { merge: true }
+        );
 
       return res.json({
         ok: true,
         prevContestId: active.id,
         nextContestId: next.id,
-        startMs: s,
-        endMs: e,
-        // ✅ this is what your frontend should download/print/store
         auditPack,
-        // helpful for UI status
-        exportedAmoeCycleId: exportCycleId,
-        ...amoeRollover,
       });
     } catch (e) {
-      return res.status(400).json({ error: e.message || "Failed to commit schedule." });
+      return res.status(400).json({ error: e.message || "commit failed" });
     }
   }
 );
@@ -1346,7 +1354,8 @@ r.post(
   async (req, res) => {
     try {
       const { targetNumber, contestId } = req.body || {};
-      const id = pickContestIdOrLast(contestId);
+      const active = await ensureActiveContestNow();
+      const id = contestId ? String(contestId) : active.id;
 
       const r0 = await computePaidWinner({ contestId: id, targetNumber });
 
