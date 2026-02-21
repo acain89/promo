@@ -70,7 +70,7 @@ function makeHeaders(extra = {}, includeAdminToken = true) {
   // Prefer JSON responses
   if (!h.Accept && !h.accept) h.Accept = "application/json";
 
-  // Force no-cache headers (client-side request)
+  // Force no-cache headers
   if (!h["Cache-Control"] && !h["cache-control"]) {
     h["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0";
   }
@@ -79,6 +79,7 @@ function makeHeaders(extra = {}, includeAdminToken = true) {
 
   if (includeAdminToken && ADMIN_TOKEN) {
     h.Authorization = `Bearer ${ADMIN_TOKEN}`;
+    h["x-admin-token"] = ADMIN_TOKEN;
   }
 
   return h;

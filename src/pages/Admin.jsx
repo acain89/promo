@@ -512,11 +512,10 @@ export default function Admin() {
         if (ad.length < 6) throw new Error("AMOE address required.");
         if (amoeGuess.length !== 4) throw new Error("AMOE guess must be 4 digits (0000–9999).");
 
-        await apiPost("/api/admin/amoe/add", { name: nm, email: em, address: ad, guess: amoeGuess });
+const r = await apiPost("/api/admin/amoe/add", { name: nm, email: em, address: ad, guess: amoeGuess });
 
         setAmoeGuessRaw("");
-        setStatus("AMOE entry added.");
-        await refresh();
+setStatus(`AMOE recorded ✅ cycle ${r.cycleId} — entry ${r.entryId} — count ${r.count}`);        await refresh();
       } catch (e) {
         setErr(errMsg(e, "Failed to add AMOE."));
       }
@@ -1091,51 +1090,58 @@ async function endNow() {
                   </div>
                 ) : null}
               </div>
-
-              {projected ? (
-                <div
-                  style={{
-                    marginTop: 10,
-                    paddingTop: 10,
-                    borderTop: "1px solid rgba(255,255,255,0.08)",
-                    display: "grid",
-                    gap: 6,
-                  }}
-                >
-                  <div className="label" style={{ textAlign: "center" }}>
-                    Projected Winner (Best DFT So Far)
-                  </div>
-
-                  <div style={compactRow}>
-                    <span className="label">UN</span>
-                    <span className="value">{projected?.winnerUN || "—"}</span>
-                  </div>
-
-                  <div style={compactRow}>
-                    <span className="label">Entry • DFT</span>
-                    <span className="value">
-                      {projected?.guess || "—"} • {String(projected?.diff ?? "—")}
-                    </span>
-                  </div>
-
-                  <div style={compactRow}>
-                    <span className="label">Target</span>
-                    <span className="value">
-                      {projected?.drawLabel || "—"} · {projected?.target || "—"}
-                    </span>
-                  </div>
-
-                  <div style={compactRow}>
-                    <span className="label">Entry TS</span>
-                    <span className="value">{formatTS(projected?.entryTimestamp || null)}</span>
-                  </div>
-
-                  <div className="miniMuted" style={{ textAlign: "center" }}>
-                    Tie rule enforced: same DFT keeps the earlier timestamp.
-                  </div>
-                </div>
-              ) : null}
             </div>
+
+        {(() => {
+  const show = active?.resolved ? active?.winner : projected;
+  if (!show) return null;
+
+  return (
+    <div
+      style={{
+        marginTop: 10,
+        paddingTop: 10,
+        borderTop: "1px solid rgba(255,255,255,0.08)",
+        display: "grid",
+        gap: 6,
+      }}
+    >
+      <div className="label" style={{ textAlign: "center" }}>
+        {active?.resolved ? "Winner! ✅" : "Projected Winner (Best DFT So Far)"}
+      </div>
+
+      <div style={compactRow}>
+        <span className="label">UN</span>
+        <span className="value">{show?.winnerUN || "—"}</span>
+      </div>
+
+      <div style={compactRow}>
+        <span className="label">Entry • DFT</span>
+        <span className="value">
+          {show?.guess || "—"} • {String(show?.diff ?? "—")}
+        </span>
+      </div>
+
+      <div style={compactRow}>
+        <span className="label">Target</span>
+        <span className="value">
+          {show?.drawLabel || "—"} · {show?.target || "—"}
+        </span>
+      </div>
+
+      <div style={compactRow}>
+        <span className="label">Entry TS</span>
+        <span className="value">{formatTS(show?.entryTimestamp || null)}</span>
+      </div>
+
+      <div className="miniMuted" style={{ textAlign: "center" }}>
+        {active?.resolved
+          ? "Winner locked until Save Window is used."
+          : "Tie rule enforced: same DFT keeps the earlier timestamp."}
+      </div>
+    </div>
+  );
+})()}
 
             {/* Resolve Targets (Unified) */}
             <div style={{ marginTop: 10, display: "grid", gap: 10 }}>

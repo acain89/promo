@@ -19,10 +19,7 @@ import checkoutConfirmRoutes from "./routes/checkoutConfirm.js";
 import adminRoutes from "./routes/admin.js";
 import adminUsers from "./routes/adminUsers.js";
 
-// ✅ Add this if you created it
 import profileBootstrapRoutes from "./routes/profileBootstrap.js";
-
-// ✅ NEW: availability endpoint for Profile (paid/AMOE claimed numbers)
 import guessAvailabilityRoutes from "./routes/guessAvailability.js";
 
 const app = express();
@@ -36,7 +33,6 @@ app.set("trust proxy", 1);
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
-  // keep CSP out for now (easy to break Stripe/inline styles)
   next();
 });
 
@@ -50,16 +46,13 @@ const NO_CACHE_PATHS = new Set([
   "/api/amoe/winners",
   "/api/round-summary",
   "/api/my-entry",
-
-  // ✅ New single-call bootstrap endpoint for Profile
   "/api/profile-bootstrap",
-
-  // ✅ NEW: number availability checks should never cache
   "/api/guess-availability",
+  // (optional) admin state is live too
+  "/api/admin/state",
 ]);
 
 app.use((req, res, next) => {
-  // Disable caching for sensitive GET endpoints
   if (req.method === "GET" && NO_CACHE_PATHS.has(req.path)) {
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
     res.setHeader("Pragma", "no-cache");
@@ -69,48 +62,87 @@ app.use((req, res, next) => {
   // Ensure Vary includes Origin (without duplicates)
   const prev = res.getHeader("Vary");
   const vary = Array.isArray(prev) ? prev.join(", ") : String(prev || "");
-
-  if (!vary) {
-    res.setHeader("Vary", "Origin");
-  } else if (!vary.split(",").map(v => v.trim()).includes("Origin")) {
+  if (!vary) res.setHeader("Vary", "Origin");
+  else if (!vary.split(",").map((v) => v.trim()).includes("Origin")) {
     res.setHeader("Vary", `${vary}, Origin`);
   }
 
   next();
 });
+
 /* =========================================================
-   CORS (cookies + Authorization for Admin)
+   CORS (cookies + Admin token header)
 ========================================================= */
 function normalizeOrigin(o) {
   return String(o || "").trim().replace(/\/+$/, "");
 }
 
+// Build allowlist once
 const allowed = (Array.isArray(ALLOWED_ORIGINS) ? ALLOWED_ORIGINS : [])
   .map(normalizeOrigin)
   .filter(Boolean);
 
-const corsOptions = {
-  origin: (origin, cb) => {
-    // allow non-browser clients / same-origin / server-to-server (Stripe has no Origin)
-    if (!origin) return cb(null, true);
+const ALLOW_METHODS = "GET,POST,PUT,PATCH,DELETE,OPTIONS";
+const ALLOW_HEADERS =
+  "Content-Type, Authorization, X-Admin-Token, x-admin-token, cache-control, pragma, expires";
 
-    const o = normalizeOrigin(origin);
-    if (allowed.includes(o)) return cb(null, true);
+/**
+ * HARD STOP FIX:
+ * Handle OPTIONS explicitly and ALWAYS include x-admin-token.
+ * This prevents the cors() middleware (or a proxy) from replying with a stale allowlist.
+ */
+app.options("*", (req, res) => {
+  const origin = req.headers.origin;
 
-    return cb(new Error("Not allowed by CORS"));
-  },
-  credentials: true,
+  // No origin = not a browser preflight
+  if (!origin) return res.sendStatus(204);
 
-  // Make preflight explicit and reliable for Admin bearer token + JSON
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "expires", "cache-control", "pragma"],
-  exposedHeaders: [],
-  optionsSuccessStatus: 204,
-  maxAge: 86400,
-};
+  const o = normalizeOrigin(origin);
+  if (!allowed.includes(o)) return res.sendStatus(204);
 
-app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Methods", ALLOW_METHODS);
+
+  // Echo requested headers if present, but ALWAYS ensure x-admin-token is allowed
+  const reqHdrs = String(req.headers["access-control-request-headers"] || "").trim();
+  if (reqHdrs) {
+    // If the browser asked for headers, reply with them PLUS our known essentials.
+    // (Browser compares case-insensitively.)
+    res.setHeader("Access-Control-Allow-Headers", `${reqHdrs}, ${ALLOW_HEADERS}`);
+  } else {
+    res.setHeader("Access-Control-Allow-Headers", ALLOW_HEADERS);
+  }
+
+  res.setHeader("Access-Control-Max-Age", "86400");
+  return res.sendStatus(204);
+});
+
+// Normal CORS for non-OPTIONS requests
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true); // server-to-server
+      const o = normalizeOrigin(origin);
+      if (allowed.includes(o)) return cb(null, true);
+      return cb(new Error("Not allowed by CORS"));
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Admin-Token",
+      "x-admin-token",
+      "cache-control",
+      "pragma",
+      "expires",
+    ],
+    optionsSuccessStatus: 204,
+    maxAge: 86400,
+  })
+);
 
 /* =========================================================
    FIRESTORE INIT
@@ -125,7 +157,6 @@ initFirestore();
 app.use(healthRoutes);
 
 // Stripe webhook MUST be mounted before express.json()
-// NOTE: stripeWebhookRoutes() already uses express.raw() internally.
 app.use("/api/stripe/webhook", stripeWebhookRoutes());
 
 // JSON + cookies for everything else
@@ -138,8 +169,7 @@ app.use(authRoutes);
 // Public
 app.use(publicRoutes);
 
-// Admin routes (admin.js/adminUsers should enforce requireAdmin internally,
-// except /api/admin/login which must stay public)
+// Admin routes
 app.use(adminRoutes);
 app.use(adminUsers);
 
@@ -167,7 +197,6 @@ app.use((err, req, res, next) => {
 /* =========================================================
    START SERVER
 ========================================================= */
-
 app.listen(PORT, async () => {
   try {
     await ensureActiveContestNow();

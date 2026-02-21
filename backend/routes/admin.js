@@ -209,6 +209,18 @@ async function trimByResolvedAt(collectionName, keep = HISTORY_LIMIT) {
   return extra.length;
 }
 
+async function hasAnyEntryWithEmailInContest(contestId, emailLower) {
+  const col = db().collection("entries").doc(contestId).collection("items");
+
+  // Preferred field
+  const q1 = await col.where("emailLower", "==", emailLower).limit(1).get();
+  if (!q1.empty) return true;
+
+  // Back-compat fallback (some docs may only store "email")
+  const q2 = await col.where("email", "==", emailLower).limit(1).get();
+  return !q2.empty;
+}
+
 /* =========================================================
    STATS — LIFETIME "TOTAL PAID OUT"
 ========================================================= */
@@ -1059,7 +1071,7 @@ async function resetAmoeCycle(req) {
 r.post(
   "/api/admin/schedule/commit",
   requireAdmin,
-  rateLimit({ routeKey: "admin_schedule_commit", limit: 30, windowMs: 15 * 60 * 1000 }),
+  rateLimit({ routeKey: "admin_schedule_commit", limit: 1000, windowMs: 15 * 60 * 1000 }),
   async (req, res) => {
     try {
       const { startMs, endMs } = req.body || {};
@@ -1476,107 +1488,132 @@ r.post(
   rateLimit({ routeKey: "admin_amoe_add", limit: 120, windowMs: 15 * 60 * 1000 }),
   async (req, res) => {
     try {
-      const { name, email, address, guess, receivedAt } = req.body || {};
+  const { name, email, address, guess, receivedAt } = req.body || {};
 
-      const nm = cleanName(name);
-      const em = cleanEmail(email);
-      const addr = cleanAddr(address);
+  const nm = cleanName(name);
+  const em = cleanEmail(email);      // lowercased trimmed
+  const addr = cleanAddr(address);
 
-      if (nm.length < 2) return res.status(400).json({ error: "Name required." });
-      if (!em.includes("@")) return res.status(400).json({ error: "Valid email required." });
-      if (addr.length < 6) return res.status(400).json({ error: "Address required." });
+  if (nm.length < 2) return res.status(400).json({ error: "Name required." });
 
-      const n = parse4DigitNumber(guess);
-      if (n == null) return res.status(400).json({ error: "Invalid AMOE number. Must be 0000–9999." });
+  // ✅ intentionally loose: allows "@test"
+  if (!em.includes("@")) return res.status(400).json({ error: "Valid email required." });
 
-      const recv = receivedAt ? Number(receivedAt) : nowMs();
-      const { ref: stateRef, state } = await getOrInitAmoeState();
+  if (addr.length < 6) return res.status(400).json({ error: "Address required." });
 
-      const status = String(state.status || "COLLECTING").toUpperCase();
-      if (status === "RESOLVED") {
-        return res.status(400).json({ error: "AMOE cycle is resolved. Reset cycle to start again." });
-      }
+  const n = parse4DigitNumber(guess);
+  if (n == null) return res.status(400).json({ error: "Invalid AMOE number. Must be 0000–9999." });
 
-      const cycleId = Number(state.cycleId || 1);
+  const recv = receivedAt ? Number(receivedAt) : nowMs();
 
-      const dupeSnap = await db()
-        .collection("amoeEntries")
-        .doc(String(cycleId))
-        .collection("items")
-        .where("emailLower", "==", em)
-        .limit(1)
-        .get();
+  const { ref: stateRef, state } = await getOrInitAmoeState();
 
-      if (!dupeSnap.empty) {
-        return res.status(400).json({
-          error: "An AMOE entry already exists for this email in the current cycle.",
-        });
-      }
+  const status = String(state.status || "COLLECTING").toUpperCase();
+  if (status === "RESOLVED") {
+    return res.status(400).json({ error: "AMOE cycle is resolved. Reset cycle to start again." });
+  }
 
-      const entryDoc = await db()
-        .collection("amoeEntries")
-        .doc(String(cycleId))
-        .collection("items")
-        .add({
-          name: nm,
-          email: em,
-          emailLower: em,
-          address: addr,
-          guess: normalizeNumber(n, 4),
-          receivedAt: recv,
-          timestamp: recv,
-          createdAt: nowMs(),
-        });
+  const cycleId = Number(state.cycleId || 1);
 
-      // Mirror into ACTIVE contest pool
-      const active = await ensureActiveContestNow();
-      if (active?.id) {
-        await db()
-          .collection("entries")
-          .doc(active.id)
-          .collection("items")
-          .add({
-            paid: false,
-            status: "AMOE",
-            source: "AMOE",
-            isAmoe: true,
-            countedInContest: true,
+  // ✅ 1) Block AMOE duplicate within current cycle
+  const dupeAmoeSnap = await db()
+    .collection("amoeEntries")
+    .doc(String(cycleId))
+    .collection("items")
+    .where("emailLower", "==", em)
+    .limit(1)
+    .get();
 
-            name: nm,
-            email: em,
-            address: addr,
+  if (!dupeAmoeSnap.empty) {
+    return res.status(400).json({ error: "Duplicate AMOE: this email already exists in the current AMOE cycle." });
+  }
 
-            username: nm,
-            guess: normalizeNumber(n, 4),
+  // ✅ 2) Block duplicates vs ANY entry already in the ACTIVE contest (PAID or AMOE)
+  const active = await ensureActiveContestNow();
+  if (!active?.id) return res.status(500).json({ error: "Active contest not available." });
 
-            timestamp: recv,
-            createdAt: nowMs(),
-            amoeCycleId: cycleId,
-            amoeEntryId: entryDoc.id,
-          });
-      }
+  const existsInContest = await hasAnyEntryWithEmailInContest(active.id, em);
+  if (existsInContest) {
+    return res.status(400).json({
+      error: "Duplicate: this email already has an entry in the current contest (AMOE or PAID).",
+    });
+  }
 
-      const nextCount = Number(state.count || 0) + 1;
+  // ✅ 3) Create AMOE entry (authoritative record)
+  const guessNorm = normalizeNumber(n, 4);
+  const entryRef = await db()
+    .collection("amoeEntries")
+    .doc(String(cycleId))
+    .collection("items")
+    .add({
+      name: nm,
+      email: em,
+      emailLower: em,
+      address: addr,
+      guess: guessNorm,
+      receivedAt: recv,
+      timestamp: recv,
+      createdAt: nowMs(),
+    });
 
-      await stateRef.set(
-        {
-          count: nextCount,
-          status: "COLLECTING",
-          updatedAt: nowMs(),
-          prizeCents: Number(state.prizeCents || AMOE_PRIZE_CENTS),
-        },
-        { merge: true }
-      );
+  // ✅ 4) Mirror into active contest pool + keep mirror id (for admin confirmation)
+  const mirrorRef = await db()
+    .collection("entries")
+    .doc(active.id)
+    .collection("items")
+    .add({
+      paid: false,
+      status: "AMOE",
+      source: "AMOE",
+      isAmoe: true,
+      countedInContest: true,
 
-      await auditLog(
-        "admin_amoe_add",
-        { cycleId, entryId: entryDoc.id, email: em, guess: normalizeNumber(n, 4), count: nextCount },
-        req
-      );
+      name: nm,
+      username: nm,
 
-      return res.json({ ok: true, cycleId, entryId: entryDoc.id, count: nextCount, status: "COLLECTING" });
-    } catch (e) {
-      return res.status(500).json({ error: e.message || "Failed to add AMOE entry." });
+      email: em,
+      emailLower: em,
+      address: addr,
+
+      guess: guessNorm,
+
+      timestamp: recv,
+      createdAt: nowMs(),
+      amoeCycleId: cycleId,
+      amoeEntryId: entryRef.id,
+    });
+
+  // ✅ 5) Increment AMOE state count
+  const nextCount = Number(state.count || 0) + 1;
+  await stateRef.set(
+    {
+      count: nextCount,
+      status: "COLLECTING",
+      updatedAt: nowMs(),
+      prizeCents: Number(state.prizeCents || AMOE_PRIZE_CENTS),
+    },
+    { merge: true }
+  );
+
+  await auditLog(
+    "admin_amoe_add",
+    { cycleId, entryId: entryRef.id, mirrorContestId: active.id, mirrorEntryId: mirrorRef.id, email: em, guess: guessNorm, count: nextCount },
+    req
+  );
+
+  // ✅ CONFIRMATION payload for UI
+  return res.json({
+    ok: true,
+    status: "RECORDED",
+    cycleId,
+    entryId: entryRef.id,
+    mirrorContestId: active.id,
+    mirrorEntryId: mirrorRef.id,
+    count: nextCount,
+    entry: { name: nm, email: em, address: addr, guess: guessNorm, receivedAt: recv },
+  });
+} catch (e) {
+  return res.status(500).json({ error: e.message || "Failed to add AMOE entry." });
     }
   }
 );

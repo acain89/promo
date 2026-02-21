@@ -360,27 +360,33 @@ function isContestStillActive(contest, atMs) {
 export async function ensureActiveContestNow() {
   const now = nowMs();
 
-  // 0) If contest/current exists and points to a still-active contest, use it.
+    // 0) If contest/current exists and points to a still-active contest, use it.
   try {
     const curSnap = await CURRENT_REF().get();
     if (curSnap.exists) {
       const cur = curSnap.data() || {};
       const curId = String(cur.contestId || "").trim();
+
       if (curId) {
         const cSnap = await db().collection("contests").doc(curId).get();
+
         if (cSnap.exists) {
           const contest = { id: cSnap.id, ...(cSnap.data() || {}) };
-          if (isContestStillActive(contest, now)) {
-            if (!contest.activatedAt) {
-              await db().collection("contests").doc(contest.id).set({ activatedAt: now }, { merge: true });
-              return { ...contest, activatedAt: now };
-            }
-            return contest;
+
+          if (!contest.activatedAt) {
+            await db()
+              .collection("contests")
+              .doc(contest.id)
+              .set({ activatedAt: now }, { merge: true });
+
+            return { ...contest, activatedAt: now };
           }
+
+          return contest;
         }
       }
     }
-  } catch {
+  } catch (e) {
     // ignore and fallback
   }
 

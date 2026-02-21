@@ -65,6 +65,31 @@ function truthyExact(w) {
   return null;
 }
 
+// Prefer "advertised/landing prize" fields if backend sends them
+function pickAdvertisedPrizeCents(w) {
+  const candidates = [
+    w?.advertisedPrizeCents,
+    w?.advertisedPrize,
+    w?.displayPrizeCents,
+    w?.displayPrize,
+    w?.landingPrizeCents,
+    w?.landingPrize,
+    w?.projectedPrizeCents,
+    w?.poolCents,
+    w?.prizePoolCents,
+    w?.prizeCents,
+    w?.prize,
+    w?.amountCents,
+    w?.amount,
+  ];
+
+  for (const c of candidates) {
+    const n = Number(c);
+    if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  }
+  return 0;
+}
+
 export default function Winners() {
   const nav = useNavigate();
   const [items, setItems] = useState([]);
@@ -104,7 +129,6 @@ export default function Winners() {
 
     const normalized = list
       .map((w, i) => {
-        // Winner/record timestamp
         const ts =
           w?.timestamp ??
           w?.winnerTimestamp ??
@@ -115,11 +139,9 @@ export default function Winners() {
           w?.submittedAt ??
           null;
 
-        const prizeCents = Number(w?.prizeCents ?? w?.prize ?? w?.amountCents ?? w?.amount ?? 0) || 0;
-        const bonusCents = Number(w?.bonusCents ?? w?.bonus ?? 0) || 0;
+        const prizeCents = pickAdvertisedPrizeCents(w);
 
         const un = safe(w?.winnerUN || w?.winner || w?.username || w?.un);
-
         const entry = pad4(w?.guess || w?.entry || w?.submission || w?.pick);
 
         const drawLabel = normalizeDrawLabel(
@@ -131,10 +153,8 @@ export default function Winners() {
         const dftRaw = w?.dft ?? w?.diff ?? w?.distance ?? w?.bestDft ?? null;
         const dft = dftRaw == null || dftRaw === "" ? "—" : String(dftRaw);
 
-        // Exact match flag (best-effort)
         const exact = truthyExact(w);
 
-        // When that draw was played (best-effort)
         const playedAt =
           w?.playedAt ??
           w?.drawPlayedAt ??
@@ -148,14 +168,13 @@ export default function Winners() {
           id: w?.id || `w-${i}`,
           un,
           entry,
-          exact, // true | false | null
+          exact,
           drawLabel,
           playedAt,
           target,
           dft,
           ts,
           prizeCents,
-          bonusCents,
         };
       })
       .sort((a, b) => (Number(b.ts || 0) || 0) - (Number(a.ts || 0) || 0))
@@ -178,7 +197,6 @@ export default function Winners() {
         </div>
       }
     >
-      {/* Layout with scrollable middle, footer stays stationary */}
       <div
         style={{
           height: "calc(100dvh - 170px)",
@@ -188,7 +206,6 @@ export default function Winners() {
           paddingBottom: 6,
         }}
       >
-        {/* Top: title + slogan */}
         <div
           style={{
             fontSize: 34,
@@ -208,7 +225,6 @@ export default function Winners() {
           <span style={{ color: "#7affc2" }}>Reveal.</span>
         </div>
 
-        {/* Last winner pinned */}
         {lastWinner ? (
           <div
             style={{
@@ -234,12 +250,7 @@ export default function Winners() {
             <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
               <div style={{ fontSize: 18, fontWeight: 950 }}>{lastWinner.un}</div>
               <div style={{ textAlign: "right" }}>
-                <div style={{ fontSize: 16, fontWeight: 950 }}>
-                  {dollarsFromCents(lastWinner.prizeCents + lastWinner.bonusCents)}
-                </div>
-                <div className="miniMuted" style={{ marginTop: 2, opacity: 0.85 }}>
-                  Prize: {dollarsFromCents(lastWinner.prizeCents)} · Bonus: {dollarsFromCents(lastWinner.bonusCents)}
-                </div>
+                <div style={{ fontSize: 16, fontWeight: 950 }}>{dollarsFromCents(lastWinner.prizeCents)}</div>
               </div>
             </div>
 
@@ -322,7 +333,6 @@ export default function Winners() {
           </div>
         ) : null}
 
-        {/* Scrollable list */}
         <div
           className="scrollList"
           style={{
@@ -374,10 +384,7 @@ export default function Winners() {
 
                 <div style={{ textAlign: "right" }}>
                   <div className="winnerPrize" style={{ fontSize: 15, fontWeight: 950 }}>
-                    {dollarsFromCents(r.prizeCents + r.bonusCents)}
-                  </div>
-                  <div className="miniMuted" style={{ marginTop: 2, opacity: 0.8 }}>
-                    Prize: {dollarsFromCents(r.prizeCents)} · Bonus: {dollarsFromCents(r.bonusCents)}
+                    {dollarsFromCents(r.prizeCents)}
                   </div>
                 </div>
               </div>
