@@ -342,19 +342,15 @@ const CURRENT_REF = () => db().collection("contest").doc("current");
 
 // A contest is "still active" if:
 // - not resolved
-// - and it has an endMs/cutoffAt that is still in the future (with a small grace)
+// - regardless of cutoff passing (cutoff only closes entries)
+// This prevents contest/current from being discarded right after cutoff.
 function isContestStillActive(contest, atMs) {
   if (!contest) return false;
   if (contest.resolved) return false;
 
-  const t = Number(atMs || 0);
-  const end = Number(contest.endMs || contest.cutoffAt || 0);
-
-  // If we somehow have no end, don’t trust it.
-  if (!Number.isFinite(end) || end <= 0) return false;
-
-  // 2 minute grace for clock skew / race-y saves
-  return t < end + 2 * 60 * 1000;
+  // Optional: if the contest is extremely old with no activity, you can fail closed.
+  // But for DrawnFray weekly flow, DO NOT expire based on endMs/cutoffAt.
+  return true;
 }
 
 export async function ensureActiveContestNow() {

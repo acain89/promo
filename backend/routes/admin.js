@@ -1098,22 +1098,25 @@ r.post(
         amoeCycleId: amoeState.cycleId,
       });
 
-      // ---------- FORCE RESOLVE ----------
+            // ---------- LOCK ENTRIES (DO NOT RESOLVE CONTEST) ----------
+      // DrawnFray rule: cutoff closes entries, but contest remains unresolved until you post draws.
+      // We only update the registration window; we do NOT set resolved/resolvedAt/resolvedBy/resolvedSlot.
       await db()
         .collection("contests")
         .doc(active.id)
         .set(
           {
-            resolved: true,
-            resolvedAt: nowMs(),
-            resolvedBy: "ADMIN_ROLLOVER",
-            resolvedSlot: 0,
-            winner: null,
+            mode: "DAILY4",
+            startMs: s,
+            endMs: e,
+            // optional debug stamp (safe)
+            rolloverCommittedAt: nowMs(),
+            rolloverCommitBy: "ADMIN_SCHEDULE_COMMIT",
           },
           { merge: true }
         );
 
-      // IMPORTANT: force lifecycle refresh
+      // IMPORTANT: refresh active contest pointer/window
       await ensureActiveContestNow();
 
       // ---------- NEXT CONTEST ----------

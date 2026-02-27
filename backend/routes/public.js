@@ -4,11 +4,9 @@ import { Router } from "express";
 import { db } from "../lib/firestore.js";
 import {
   ensureActiveContestNow,
-  ensureContestForCutoff,
   getRegistrationWindow,
   isRegistrationOpenAt,
   mmddyyyyFromCutoffMs,
-  mostRecentChicagoCutoffAtOrBefore,
 } from "../lib/time.js";
 import { nowMs } from "../lib/utils.js";
 import requireUser from "../middleware/auth.js";
@@ -114,7 +112,7 @@ function targetsToDaily4Draws(targets, resolvedSlot) {
    ✅ For DrawnFray weekly flow:
    - Reveal must NEVER fall back to "most recent cutoff".
    - Reveal must ALWAYS use contest/current (manual lifecycle source of truth).
-   - Idiot-proof: if pointer is missing/invalid, return null and let route fail closed.
+   - Fail-closed if pointer missing.
 ========================================================= */
 
 async function getCurrentContestStrict() {
@@ -129,22 +127,16 @@ async function getCurrentContestStrict() {
   if (!cSnap.exists) return null;
 
   const c = cSnap.data() || {};
-
-  // ✅ Idiot-proof fix:
-  // Force the returned contest to be keyed to the pointer, so stale embedded ids can't leak.
-  // (Some older docs may have missing/incorrect c.id.)
   return { ...c, id: contestId };
 }
 
 async function ensureRevealContestNow() {
-  // ✅ Reveal is anchored to current weekly contest pointer (manual control).
-  // ❌ No cutoff-based selection here.
   return getCurrentContestStrict();
 }
 
 /* =========================================================
    PUBLIC — CONTEST STATE (ACTIVE CONTEST) — DAILY4 ONLY
-   ✅ Landing countdown now follows the Admin-controlled registration window end
+   ✅ Landing countdown follows Admin-controlled registration window end
 ========================================================= */
 
 r.get("/api/contest", async (req, res) => {
@@ -168,8 +160,7 @@ r.get("/api/contest", async (req, res) => {
     const startMs = win.startMs ?? null;
     const endMs = win.endMs ?? null;
 
-    // ✅ Landing's big red timer counts down to contest.cutoffAt.
-    // We set cutoffAt to the *registration window end* so it matches Admin.
+    // ✅ Landing timer counts down to registration window end
     const cutoffAt = Number.isFinite(Number(endMs)) && Number(endMs) > 0 ? Number(endMs) : contest.cutoffAt ?? null;
 
     const endsOnMs = cutoffAt ?? null;
@@ -192,17 +183,14 @@ r.get("/api/contest", async (req, res) => {
       id: contest.id || null,
       mode: "DAILY4",
 
-      // ✅ countdown source of truth for Landing
       cutoffAt,
       endsOnMs,
       endsOn: endsOnText,
 
-      // ✅ expose window for consistency/debug
       startMs,
       endMs,
       windowSource: win.source,
 
-      // optional helper flags
       playOpen: openNow,
       playStatus,
 
@@ -245,7 +233,6 @@ r.get("/api/round-summary", requireUser, async (req, res) => {
 
     const contest = contestSnap.data() || {};
 
-    // Do not expose pick distribution before results are posted.
     if (!contest.resolved) {
       return res.status(403).json({ error: "Round summary is available after results are posted." });
     }
@@ -271,7 +258,6 @@ r.get("/api/round-summary", requireUser, async (req, res) => {
 
     const winner = winnerSnap.empty ? null : winnerSnap.docs[0].data();
 
-    // legacy single-target field (may be set when exact hit ends early)
     const targetNumber = contest.targetNumber ? padN(contest.targetNumber, digits) : null;
 
     return res.json({
@@ -321,6 +307,7 @@ r.get("/api/amoe/winners", async (req, res) => {
    PUBLIC — REVEAL STATE (REVEAL PAID CONTEST + AMOE)
    ✅ Reveal anchored to contest/current (manual weekly lifecycle)
    ✅ Includes sequential targets + projectedWinner + stable winner snapshot
+   ✅ HARD SAFETY: Winner cannot leak early unless all “finalization” fields are present
 ========================================================= */
 
 r.get("/api/reveal-state", async (req, res) => {
@@ -350,13 +337,17 @@ r.get("/api/reveal-state", async (req, res) => {
       .limit(1)
       .get();
 
-    const paidWinner = paidWinnerSnap.empty ? null : { id: paidWinnerSnap.docs[0].id, ...paidWinnerSnap.docs[0].data() };
+    const paidWinner = paidWinnerSnap.empty
+      ? null
+      : { id: paidWinnerSnap.docs[0].id, ...paidWinnerSnap.docs[0].data() };
 
     const amoeStateSnap = await db().collection("amoe").doc("state").get();
     const amoeState = amoeStateSnap.exists ? amoeStateSnap.data() : null;
 
     const amoeWinnerSnap = await db().collection("amoeWinners").orderBy("resolvedAt", "desc").limit(1).get();
-    const amoeWinner = amoeWinnerSnap.empty ? null : { id: amoeWinnerSnap.docs[0].id, ...amoeWinnerSnap.docs[0].data() };
+    const amoeWinner = amoeWinnerSnap.empty
+      ? null
+      : { id: amoeWinnerSnap.docs[0].id, ...amoeWinnerSnap.docs[0].data() };
 
     const paidGuaranteed = Number(paid?.guaranteedPrizeCents || 0);
     const paidBonus = Number(paid?.bonusPrizeCents || 0);
@@ -371,8 +362,50 @@ r.get("/api/reveal-state", async (req, res) => {
     const paidTargets = paid?.targets && typeof paid.targets === "object" ? paid.targets : {};
     const resolvedSlot = paid?.resolvedSlot ?? null;
 
-    // Back-compat convenience for some UIs (and safe fallback for old clients)
     const daily4Draws = targetsToDaily4Draws(paidTargets, resolvedSlot);
+
+    // ✅ HARD SAFETY LOCK:
+    // Only treat as "resolved" if the contest has the minimum finalization fields.
+    // This prevents “winner leak” if something accidentally flips resolved early.
+    const safeResolved =
+      !!paid?.resolved &&
+      !!paid?.resolvedAt &&
+      !!paid?.winner &&
+      paid?.targetNumber != null &&
+      String(paid.targetNumber).trim() !== "";
+
+    const safePaidBlock = {
+      id: paidId,
+      mode: "DAILY4",
+      cutoffAt: paid.cutoffAt ?? cutoffAt ?? null,
+      endsOnMs,
+      endsOn: endsOnText,
+
+      resolved: safeResolved,
+      resolvedAt: safeResolved ? paid.resolvedAt ?? null : null,
+
+      // legacy single-target (keep) — but only expose when safely resolved
+      targetNumber: safeResolved ? paid.targetNumber ?? null : null,
+
+      // sequential targets + running best are safe to show always
+      targets: paidTargets,
+      projectedWinner: paid.projectedWinner ?? null,
+
+      // end semantics only when safely resolved
+      resolvedBy: safeResolved ? paid.resolvedBy ?? null : null,
+      resolvedSlot: safeResolved ? paid.resolvedSlot ?? null : null,
+
+      // stable winner snapshot only when safely resolved
+      winner: safeResolved ? paid.winner ?? null : null,
+
+      daily4Draws,
+
+      guaranteedPrizeCents: paidGuaranteed,
+      bonusPrizeCents: paidBonus,
+      finalPrizeCents: paidFinal,
+
+      prizeHeadline: String(paid.prizeHeadline || paid.headline || "").trim() || "$100 guaranteed + bonus",
+    };
 
     return res.json({
       ok: true,
@@ -381,42 +414,10 @@ r.get("/api/reveal-state", async (req, res) => {
 
       totalPaidOutCents,
 
-      paid: {
-        id: paidId,
-        mode: "DAILY4",
-        cutoffAt: paid.cutoffAt ?? cutoffAt ?? null,
-        endsOnMs,
-        endsOn: endsOnText,
+      paid: safePaidBlock,
 
-        resolved: !!paid.resolved,
-        resolvedAt: paid.resolvedAt ?? null,
-
-        // legacy single-target (keep)
-        targetNumber: paid.targetNumber ?? null,
-
-        // sequential targets + running best
-        targets: paidTargets,
-        projectedWinner: paid.projectedWinner ?? null,
-
-        // end semantics
-        resolvedBy: paid.resolvedBy ?? null,
-        resolvedSlot: paid.resolvedSlot ?? null,
-
-        // stable winner snapshot (preferred by UI)
-        winner: paid.winner ?? null,
-
-        // optional back-compat convenience
-        daily4Draws,
-
-        guaranteedPrizeCents: paidGuaranteed,
-        bonusPrizeCents: paidBonus,
-        finalPrizeCents: paidFinal,
-
-        prizeHeadline: String(paid.prizeHeadline || paid.headline || "").trim() || "$100 guaranteed + bonus",
-      },
-
-      // historical record (can differ from paid.winner if you ever change formats)
-      paidWinner,
+      // historical record can differ — but we still must not leak it early
+      paidWinner: safeResolved ? paidWinner : null,
 
       amoe: amoeState
         ? {
@@ -472,7 +473,7 @@ r.get("/api/my-entry", requireUser, async (req, res) => {
       const cutoffAt = c.cutoffAt ?? null;
       contestEndsOn = cutoffAt ? mmddyyyyFromCutoffMs(cutoffAt) : null;
     } else {
-      // ✅ Default to contest/current (manual weekly lifecycle), never cutoff-based selection
+      // ✅ Default to contest/current (manual weekly lifecycle)
       const contest = await getCurrentContestStrict();
       if (!contest || !contest.id) return res.json({ ok: false });
 

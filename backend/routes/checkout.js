@@ -11,6 +11,7 @@ import { auditLog } from "../lib/audit.js";
 import { onlyDigits, normalizeNumber, nowMs } from "../lib/utils.js";
 import { ensureActiveContestNow } from "../lib/time.js";
 import { stripe } from "../lib/stripe.js";
+import { ensureActiveContestNow, isRegistrationOpenAt } from "../lib/time.js";
 
 const r = Router();
 
@@ -80,15 +81,8 @@ function isRetryablePaidStatus(statusUpper) {
  * - if start/end missing -> fallback open (back-compat)
  */
 function isRegistrationOpen(contest, now) {
-  if (!contest || contest.resolved) return false;
-
-  const startMs = Number(contest.startMs ?? contest.start ?? 0);
-  const endMs = Number(contest.endMs ?? contest.end ?? 0);
-
-  // Back-compat: if not configured, do not block paid entries
-  if (!startMs || !endMs) return true;
-
-  return now >= startMs && now < endMs;
+  // Use the shared window logic (manual overrides, defaults, etc.)
+  return isRegistrationOpenAt(contest, now);
 }
 
 /* =========================================================
