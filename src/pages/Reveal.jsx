@@ -186,25 +186,25 @@ function StatPill({ label, value }) {
   return (
     <div
       style={{
-        borderRadius: 14,
+        borderRadius: 16,
         padding: "12px 12px",
-        minHeight: 60,
+        minHeight: 64,
         display: "grid",
         alignContent: "center",
-        background: isBlank ? "rgba(18,24,34,0.55)" : "rgba(18,24,34,0.70)",
-        border: isBlank ? `1px solid rgba(24,242,213,0.22)` : `1px solid rgba(24,242,213,0.44)`,
+        background: isBlank ? "rgba(18,24,34,0.55)" : "rgba(18,24,34,0.72)",
+        border: isBlank ? `1px solid rgba(24,242,213,0.18)` : `1px solid rgba(24,242,213,0.42)`,
         boxShadow: isBlank
-          ? "0 10px 18px rgba(0,0,0,0.30), 0 0 10px rgba(24,242,213,0.10)"
-          : `0 10px 18px rgba(0,0,0,0.32), 0 0 16px ${REVEAL_GLOW}`,
+          ? "0 10px 20px rgba(0,0,0,0.32), 0 0 10px rgba(24,242,213,0.10)"
+          : `0 12px 22px rgba(0,0,0,0.34), 0 0 18px ${REVEAL_GLOW}`,
         animation: isBlank ? "revealPending 2.8s ease-in-out infinite" : "none",
       }}
     >
       <div
         style={{
           fontSize: 10,
-          letterSpacing: "0.16em",
+          letterSpacing: "0.18em",
           textTransform: "uppercase",
-          opacity: 0.85,
+          opacity: 0.82,
           color: "rgba(231,235,243,0.78)",
         }}
       >
@@ -213,12 +213,12 @@ function StatPill({ label, value }) {
 
       <div
         style={{
-          fontSize: 18,
+          fontSize: 20,
           fontWeight: 950,
-          marginTop: 3,
-          letterSpacing: "0.06em",
+          marginTop: 4,
+          letterSpacing: "0.08em",
           color: "#ffffff",
-          textShadow: isBlank ? "0 0 8px rgba(24,242,213,0.10)" : "0 0 12px rgba(24,242,213,0.20)",
+          textShadow: isBlank ? "0 0 8px rgba(24,242,213,0.10)" : "0 0 14px rgba(24,242,213,0.22)",
           fontVariantNumeric: "tabular-nums",
           fontFeatureSettings: '"tnum" 1',
           opacity: isBlank ? 0.78 : 1,
@@ -484,16 +484,6 @@ export default function Reveal() {
     return null;
   }, [paid?.manualWindowEnabled, paid?.manualEndMs, paid?.endMs, paid?.end, paid?.cutoffAt, state?.cutoffAt]);
 
-  const contestStartMs = useMemo(() => {
-    const manualEnabled = !!paid?.manualWindowEnabled;
-    const manualStart = Number(paid?.manualStartMs ?? 0);
-    const startMs = Number(paid?.startMs ?? paid?.start ?? 0);
-
-    if (manualEnabled && Number.isFinite(manualStart) && manualStart > 0) return manualStart;
-    if (Number.isFinite(startMs) && startMs > 0) return startMs;
-    return null;
-  }, [paid?.manualWindowEnabled, paid?.manualStartMs, paid?.startMs, paid?.start]);
-
   const weekEnding = useMemo(() => {
     if (contestEndMs) return formatDateChicago(contestEndMs);
     // LAST RESORT fallback (display only)
@@ -508,50 +498,38 @@ export default function Reveal() {
     return s || null;
   }, [contestEndMs, state]);
 
-  const countdown = useMemo(() => {
+  // Premium: subtle "current contest reference" line ONLY (no ids/cycles/timers)
+  const headerLine = useMemo(() => {
+    if (!weekEnding) return null;
+    return `Week ending ${weekEnding}`;
+  }, [weekEnding]);
+
+  // Optional: we still compute countdown for logic (but DO NOT show it)
+  // Keeping this here is harmless and can be used later if you ever want a small “closes in” pill.
+  useMemo(() => {
     if (!contestEndMs) return "—";
     const msLeft = Number(contestEndMs) - Number(uiNow || Date.now());
     return formatCountdown(msLeft);
   }, [contestEndMs, uiNow]);
 
-  const contestId = useMemo(() => {
-    return (
-      String(paid?.id || paid?.contestId || state?.contestId || state?.paidContestId || "").trim() || null
-    );
-  }, [paid?.id, paid?.contestId, state?.contestId, state?.paidContestId]);
-
-  const amoeCycleId = useMemo(() => {
-    const v = state?.amoe?.cycleId ?? state?.amoeCycleId ?? null;
-    const n = Number(v);
-    return Number.isFinite(n) && n > 0 ? n : null;
-  }, [state?.amoe?.cycleId, state?.amoeCycleId]);
-
-  const amoeCount = useMemo(() => {
-    const n = Number(state?.amoe?.count ?? state?.amoeCount ?? 0);
-    return Number.isFinite(n) && n >= 0 ? n : 0;
-  }, [state?.amoe?.count, state?.amoeCount]);
-
-  const amoeTargetCount = useMemo(() => {
-    const n = Number(state?.amoe?.targetCount ?? state?.amoeTargetCount ?? 0);
-    return Number.isFinite(n) && n > 0 ? n : null;
-  }, [state?.amoe?.targetCount, state?.amoeTargetCount]);
-
   const winnerBoxStyle = paidResolved
     ? {
-        padding: "14px 14px",
-        borderRadius: 14,
+        padding: "16px 14px",
+        borderRadius: 16,
         border: `1px solid rgba(24,242,213,0.55)`,
-        background: "rgba(24,242,213,0.10)",
+        background:
+          "linear-gradient(180deg, rgba(24,242,213,0.12), rgba(18,24,34,0.55))",
         boxShadow:
-          "0 14px 30px rgba(0,0,0,0.42), 0 0 24px rgba(24,242,213,0.26), 0 0 0 1px rgba(24,242,213,0.14)",
+          "0 16px 34px rgba(0,0,0,0.44), 0 0 28px rgba(24,242,213,0.24), 0 0 0 1px rgba(24,242,213,0.12)",
         transform: "scale(1.01)",
       }
     : {
-        padding: "14px 14px",
-        borderRadius: 14,
+        padding: "16px 14px",
+        borderRadius: 16,
         border: `1px solid rgba(24,242,213,0.22)`,
-        background: "rgba(24,242,213,0.05)",
-        boxShadow: "0 0 16px rgba(24,242,213,0.10)",
+        background:
+          "linear-gradient(180deg, rgba(24,242,213,0.06), rgba(18,24,34,0.50))",
+        boxShadow: "0 0 18px rgba(24,242,213,0.10)",
       };
 
   return (
@@ -603,6 +581,7 @@ export default function Reveal() {
               color: "var(--accent)",
               marginTop: 10,
               textAlign: "center",
+              textShadow: "0 10px 30px rgba(0,0,0,0.45)",
             }}
           >
             drawnfray
@@ -615,61 +594,30 @@ export default function Reveal() {
           </div>
         </div>
 
-        {/* ✅ Unified banner: week ending + countdown + contest/cycle */}
-        <div
-          style={{
-            textAlign: "center",
-            padding: "10px 12px",
-            borderRadius: 14,
-            border: "1px solid rgba(255,255,255,0.10)",
-            background: "rgba(18,24,34,0.46)",
-            boxShadow: "0 10px 18px rgba(0,0,0,0.22)",
-            display: "grid",
-            gap: 6,
-          }}
-        >
-          {weekEnding ? (
-            <div className="miniMuted">
-              Week ending <strong>{weekEnding}</strong>
+        {/* ✅ Premium single-line reference (NO ids / NO cycles / NO countdown) */}
+        {headerLine ? (
+          <div
+            style={{
+              textAlign: "center",
+              padding: "10px 12px",
+              borderRadius: 16,
+              border: "1px solid rgba(255,255,255,0.10)",
+              background: "linear-gradient(180deg, rgba(18,24,34,0.62), rgba(18,24,34,0.40))",
+              boxShadow: "0 12px 22px rgba(0,0,0,0.26)",
+            }}
+          >
+            <div
+              style={{
+                fontSize: 12,
+                letterSpacing: "0.14em",
+                textTransform: "uppercase",
+                color: "rgba(231,235,243,0.78)",
+              }}
+            >
+              {headerLine}
             </div>
-          ) : null}
-
-          <div style={{ fontSize: 12, letterSpacing: "0.12em", opacity: 0.9 }}>
-            <span style={{ color: "rgba(231,235,243,0.72)" }}>TIME LEFT:</span>{" "}
-            <span style={{ fontWeight: 900, color: REVEAL_ACCENT }}>{countdown}</span>
           </div>
-
-          <div style={{ fontSize: 11, opacity: 0.78, letterSpacing: "0.08em" }}>
-            {contestId ? (
-              <span>
-                CONTEST <strong>{contestId}</strong>
-              </span>
-            ) : (
-              <span>CONTEST —</span>
-            )}
-            {"  "}•{"  "}
-            {amoeCycleId ? (
-              <span>
-                AMOE CYCLE <strong>{amoeCycleId}</strong>
-              </span>
-            ) : (
-              <span>AMOE CYCLE —</span>
-            )}
-            {"  "}•{"  "}
-            <span>
-              AMOE {amoeCount}
-              {amoeTargetCount ? `/${amoeTargetCount}` : ""}
-            </span>
-          </div>
-
-          {(contestStartMs || contestEndMs) && (
-            <div style={{ fontSize: 11, opacity: 0.65 }}>
-              {contestStartMs ? `Opens (CT): ${formatDateTimeChicago(contestStartMs)}` : ""}
-              {contestStartMs && contestEndMs ? " • " : ""}
-              {contestEndMs ? `Closes (CT): ${formatDateTimeChicago(contestEndMs)}` : ""}
-            </div>
-          )}
-        </div>
+        ) : null}
 
         {loading ? <div className="fineprint">Loading…</div> : null}
         {err ? <div className="error">{err}</div> : null}
@@ -697,6 +645,8 @@ export default function Reveal() {
               marginBottom: 10,
               color: paidResolved ? REVEAL_ACCENT : "rgba(231,235,243,0.62)",
               opacity: paidResolved ? 1 : 0.85,
+              letterSpacing: "0.14em",
+              textTransform: "uppercase",
             }}
           >
             {paidResolved ? "Winner" : "Projected Winner"}
@@ -707,10 +657,10 @@ export default function Reveal() {
               <div style={{ textAlign: "center" }}>
                 <div
                   style={{
-                    fontSize: "1.25rem",
+                    fontSize: "1.35rem",
                     fontWeight: 950,
                     letterSpacing: "0.02em",
-                    textShadow: paidResolved ? "0 0 14px rgba(24,242,213,0.18)" : "none",
+                    textShadow: paidResolved ? "0 0 16px rgba(24,242,213,0.22)" : "none",
                   }}
                 >
                   {proj.username}
@@ -769,14 +719,23 @@ export default function Reveal() {
         <div
           className="myStatusBlock"
           style={{
-            padding: "14px 14px",
-            borderRadius: 14,
+            padding: "16px 14px",
+            borderRadius: 16,
             border: `1px solid ${REVEAL_SOFT}`,
-            background: REVEAL_BG,
-            boxShadow: `0 0 14px rgba(24,242,213,0.08)`,
+            background: "linear-gradient(180deg, rgba(24,242,213,0.05), rgba(18,24,34,0.46))",
+            boxShadow: `0 0 16px rgba(24,242,213,0.08)`,
           }}
         >
-          <div className="label" style={{ textAlign: "center", marginBottom: 10 }}>
+          <div
+            className="label"
+            style={{
+              textAlign: "center",
+              marginBottom: 10,
+              letterSpacing: "0.14em",
+              textTransform: "uppercase",
+              opacity: 0.9,
+            }}
+          >
             My Status
           </div>
 
@@ -792,15 +751,15 @@ export default function Reveal() {
           ) : (
             <div
               style={{
-                borderRadius: 12,
+                borderRadius: 14,
                 border: "1px solid rgba(255,255,255,0.10)",
-                background: "rgba(18,24,34,0.40)",
-                padding: 10,
+                background: "rgba(18,24,34,0.44)",
+                padding: 12,
                 display: "grid",
-                gap: 3,
+                gap: 4,
                 fontSize: 13,
-                lineHeight: 1.1,
-                boxShadow: "0 10px 18px rgba(0,0,0,0.24)",
+                lineHeight: 1.12,
+                boxShadow: "0 12px 22px rgba(0,0,0,0.24)",
               }}
             >
               <Row label="UN:" value={myUsername} />

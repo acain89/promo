@@ -4,9 +4,11 @@ import { Router } from "express";
 import { db } from "../lib/firestore.js";
 import {
   ensureActiveContestNow,
+  ensureContestForCutoff,
   getRegistrationWindow,
   isRegistrationOpenAt,
   mmddyyyyFromCutoffMs,
+  mostRecentChicagoCutoffAtOrBefore,
 } from "../lib/time.js";
 import { nowMs } from "../lib/utils.js";
 import requireUser from "../middleware/auth.js";
@@ -108,6 +110,17 @@ function targetsToDaily4Draws(targets, resolvedSlot) {
 }
 
 /* =========================================================
+   REVEAL CONTEST SELECTION
+   ✅ Reveal should reference the contest that MOST RECENTLY CLOSED
+   (the game being revealed), NOT the upcoming contest.
+========================================================= */
+async function ensureRevealContestNow() {
+  const now = nowMs();
+  const revealCutoff = mostRecentChicagoCutoffAtOrBefore(now);
+  return ensureContestForCutoff(revealCutoff);
+}
+
+/* =========================================================
    PUBLIC — CONTEST STATE (ACTIVE CONTEST) — DAILY4 ONLY
    ✅ Landing countdown now follows the Admin-controlled registration window end
 ========================================================= */
@@ -126,8 +139,7 @@ r.get("/api/contest", async (req, res) => {
     const finalPrizeCents = Number(contest.finalPrizeCents || 0) || guaranteedPrizeCents + bonusPrizeCents;
 
     // Landing headline text (lets Admin change copy without a frontend deploy)
-    const prizeHeadline =
-      String(contest.prizeHeadline || contest.headline || "").trim() || "$100 guaranteed + bonus";
+    const prizeHeadline = String(contest.prizeHeadline || contest.headline || "").trim() || "$100 guaranteed + bonus";
 
     // ✅ Registration window (includes manual overrides)
     const win = getRegistrationWindow(contest);
@@ -136,8 +148,7 @@ r.get("/api/contest", async (req, res) => {
 
     // ✅ Landing's big red timer counts down to contest.cutoffAt.
     // We set cutoffAt to the *registration window end* so it matches Admin.
-    const cutoffAt =
-      Number.isFinite(Number(endMs)) && Number(endMs) > 0 ? Number(endMs) : contest.cutoffAt ?? null;
+    const cutoffAt = Number.isFinite(Number(endMs)) && Number(endMs) > 0 ? Number(endMs) : contest.cutoffAt ?? null;
 
     const endsOnMs = cutoffAt ?? null;
     const endsOnText = endsOnMs ? mmddyyyyFromCutoffMs(endsOnMs) : null;
@@ -285,19 +296,18 @@ r.get("/api/amoe/winners", async (req, res) => {
 });
 
 /* =========================================================
-   PUBLIC — REVEAL STATE (ACTIVE PAID CONTEST + AMOE)
-   ✅ Active contest anchored to cutoffAt (weekly correct)
+   PUBLIC — REVEAL STATE (REVEAL PAID CONTEST + AMOE)
+   ✅ Reveal anchored to the MOST RECENTLY CLOSED contest (the game being revealed)
    ✅ Includes sequential targets + projectedWinner + stable winner snapshot
-   ✅ If exact match occurs early, later draws are not present (and UI should not show them)
 ========================================================= */
 
 r.get("/api/reveal-state", async (req, res) => {
   try {
     setNoCache(res);
 
-    const active = await ensureActiveContestNow();
-    const paidId = active?.id || null;
-    const activeCutoffAt = active?.cutoffAt ?? null;
+    const revealContest = await ensureRevealContestNow();
+    const paidId = revealContest?.id || null;
+    const cutoffAt = revealContest?.cutoffAt ?? null;
 
     let paid = null;
     if (paidId) {
@@ -311,7 +321,9 @@ r.get("/api/reveal-state", async (req, res) => {
       : null;
 
     const paidWinner =
-      !paidWinnerSnap || paidWinnerSnap.empty ? null : { id: paidWinnerSnap.docs[0].id, ...paidWinnerSnap.docs[0].data() };
+      !paidWinnerSnap || paidWinnerSnap.empty
+        ? null
+        : { id: paidWinnerSnap.docs[0].id, ...paidWinnerSnap.docs[0].data() };
 
     const amoeStateSnap = await db().collection("amoe").doc("state").get();
     const amoeState = amoeStateSnap.exists ? amoeStateSnap.data() : null;
@@ -323,7 +335,7 @@ r.get("/api/reveal-state", async (req, res) => {
     const paidBonus = Number(paid?.bonusPrizeCents || 0);
     const paidFinal = Number(paid?.finalPrizeCents || 0) || paidGuaranteed + paidBonus;
 
-    const endsOnMs = paid?.cutoffAt ?? activeCutoffAt ?? null;
+    const endsOnMs = paid?.cutoffAt ?? cutoffAt ?? null;
     const endsOnText = endsOnMs ? mmddyyyyFromCutoffMs(endsOnMs) : null;
 
     const cfg = await getPublicConfig();
@@ -346,7 +358,7 @@ r.get("/api/reveal-state", async (req, res) => {
         ? {
             id: paid.id || paidId,
             mode: "DAILY4",
-            cutoffAt: paid.cutoffAt ?? activeCutoffAt ?? null,
+            cutoffAt: paid.cutoffAt ?? cutoffAt ?? null,
             endsOnMs,
             endsOn: endsOnText,
 
@@ -379,7 +391,7 @@ r.get("/api/reveal-state", async (req, res) => {
         : {
             id: paidId,
             mode: "DAILY4",
-            cutoffAt: activeCutoffAt,
+            cutoffAt: cutoffAt,
             endsOnMs,
             endsOn: endsOnText,
 
@@ -435,6 +447,7 @@ r.get("/api/reveal-state", async (req, res) => {
 /* =========================================================
    MY ENTRY — AUTH REQUIRED
    ✅ contestEndsOn computed from cutoffAt (never stale strings)
+   ✅ default contest for Reveal should be the MOST RECENTLY CLOSED contest
 ========================================================= */
 
 r.get("/api/my-entry", requireUser, async (req, res) => {
@@ -458,7 +471,8 @@ r.get("/api/my-entry", requireUser, async (req, res) => {
       const cutoffAt = c.cutoffAt ?? null;
       contestEndsOn = cutoffAt ? mmddyyyyFromCutoffMs(cutoffAt) : null;
     } else {
-      const contest = await ensureActiveContestNow();
+      // ✅ Default to reveal contest (most recently closed), not the upcoming contest
+      const contest = await ensureRevealContestNow();
       if (!contest || !contest.id) return res.json({ ok: false });
 
       contestId = contest.id;
