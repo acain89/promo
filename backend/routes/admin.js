@@ -6,6 +6,7 @@ import rateLimit from "../middleware/rateLimit.js";
 
 import { db } from "../lib/firestore.js";
 import { auditLog } from "../lib/audit.js";
+import admin from "firebase-admin";
 
 import {
   ADMIN_CODE,
@@ -1547,6 +1548,7 @@ r.post(
         .collection("guessIndex")
         .doc(String(guessNorm));
 
+      const contestRef = db().collection("contests").doc(contestId);
       const emailKey = emailKeyFromLower(em);
       const emailIndexRef = db()
         .collection("entries")
@@ -1594,6 +1596,13 @@ r.post(
           timestamp: recv,
           createdAt: nowMs(),
         });
+
+          // ✅ increment live contest player count (so UI updates)
+tx.set(
+  contestRef,
+  { entryCount: admin.firestore.FieldValue.increment(1) },
+  { merge: true }
+);
 
         // ----- Mirror into contest -----
         tx.create(mirrorRef, {
