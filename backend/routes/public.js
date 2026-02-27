@@ -111,13 +111,35 @@ function targetsToDaily4Draws(targets, resolvedSlot) {
 
 /* =========================================================
    REVEAL CONTEST SELECTION
-   ✅ Reveal should reference the contest that MOST RECENTLY CLOSED
-   (the game being revealed), NOT the upcoming contest.
+   ✅ For DrawnFray weekly flow:
+   - Reveal must NEVER fall back to "most recent cutoff".
+   - Reveal must ALWAYS use contest/current (manual lifecycle source of truth).
+   - Idiot-proof: if pointer is missing/invalid, return null and let route fail closed.
 ========================================================= */
+
+async function getCurrentContestStrict() {
+  const ptrSnap = await db().collection("contest").doc("current").get();
+  if (!ptrSnap.exists) return null;
+
+  const ptr = ptrSnap.data() || {};
+  const contestId = String(ptr.contestId || "").trim();
+  if (!contestId) return null;
+
+  const cSnap = await db().collection("contests").doc(contestId).get();
+  if (!cSnap.exists) return null;
+
+  const c = cSnap.data() || {};
+
+  // ✅ Idiot-proof fix:
+  // Force the returned contest to be keyed to the pointer, so stale embedded ids can't leak.
+  // (Some older docs may have missing/incorrect c.id.)
+  return { ...c, id: contestId };
+}
+
 async function ensureRevealContestNow() {
-  const now = nowMs();
-  const revealCutoff = mostRecentChicagoCutoffAtOrBefore(now);
-  return ensureContestForCutoff(revealCutoff);
+  // ✅ Reveal is anchored to current weekly contest pointer (manual control).
+  // ❌ No cutoff-based selection here.
+  return getCurrentContestStrict();
 }
 
 /* =========================================================
@@ -297,7 +319,7 @@ r.get("/api/amoe/winners", async (req, res) => {
 
 /* =========================================================
    PUBLIC — REVEAL STATE (REVEAL PAID CONTEST + AMOE)
-   ✅ Reveal anchored to the MOST RECENTLY CLOSED contest (the game being revealed)
+   ✅ Reveal anchored to contest/current (manual weekly lifecycle)
    ✅ Includes sequential targets + projectedWinner + stable winner snapshot
 ========================================================= */
 
@@ -305,25 +327,30 @@ r.get("/api/reveal-state", async (req, res) => {
   try {
     setNoCache(res);
 
-    const revealContest = await ensureRevealContestNow();
-    const paidId = revealContest?.id || null;
-    const cutoffAt = revealContest?.cutoffAt ?? null;
+    const paid = await ensureRevealContestNow();
 
-    let paid = null;
-    if (paidId) {
-      const paidSnap = await db().collection("contests").doc(paidId).get();
-      paid = paidSnap.exists ? paidSnap.data() : null;
+    // ✅ Fail closed: never fall back to any other contest.
+    if (!paid || !paid.id) {
+      return res.json({
+        ok: false,
+        serverNow: nowMs(),
+        paymentsEnabled: paymentsEnabled(),
+        error: "No active contest pointer.",
+      });
     }
 
-    // Winner for THIS contest (historical record)
-    const paidWinnerSnap = paidId
-      ? await db().collection("winners").where("contestId", "==", paidId).orderBy("resolvedAt", "desc").limit(1).get()
-      : null;
+    const paidId = paid.id;
+    const cutoffAt = paid?.cutoffAt ?? null;
 
-    const paidWinner =
-      !paidWinnerSnap || paidWinnerSnap.empty
-        ? null
-        : { id: paidWinnerSnap.docs[0].id, ...paidWinnerSnap.docs[0].data() };
+    // Winner for THIS contest (historical record)
+    const paidWinnerSnap = await db()
+      .collection("winners")
+      .where("contestId", "==", paidId)
+      .orderBy("resolvedAt", "desc")
+      .limit(1)
+      .get();
+
+    const paidWinner = paidWinnerSnap.empty ? null : { id: paidWinnerSnap.docs[0].id, ...paidWinnerSnap.docs[0].data() };
 
     const amoeStateSnap = await db().collection("amoe").doc("state").get();
     const amoeState = amoeStateSnap.exists ? amoeStateSnap.data() : null;
@@ -354,65 +381,39 @@ r.get("/api/reveal-state", async (req, res) => {
 
       totalPaidOutCents,
 
-      paid: paid
-        ? {
-            id: paid.id || paidId,
-            mode: "DAILY4",
-            cutoffAt: paid.cutoffAt ?? cutoffAt ?? null,
-            endsOnMs,
-            endsOn: endsOnText,
+      paid: {
+        id: paidId,
+        mode: "DAILY4",
+        cutoffAt: paid.cutoffAt ?? cutoffAt ?? null,
+        endsOnMs,
+        endsOn: endsOnText,
 
-            resolved: !!paid.resolved,
-            resolvedAt: paid.resolvedAt ?? null,
+        resolved: !!paid.resolved,
+        resolvedAt: paid.resolvedAt ?? null,
 
-            // legacy single-target (keep)
-            targetNumber: paid.targetNumber ?? null,
+        // legacy single-target (keep)
+        targetNumber: paid.targetNumber ?? null,
 
-            // sequential targets + running best
-            targets: paidTargets,
-            projectedWinner: paid.projectedWinner ?? null,
+        // sequential targets + running best
+        targets: paidTargets,
+        projectedWinner: paid.projectedWinner ?? null,
 
-            // end semantics
-            resolvedBy: paid.resolvedBy ?? null,
-            resolvedSlot: paid.resolvedSlot ?? null,
+        // end semantics
+        resolvedBy: paid.resolvedBy ?? null,
+        resolvedSlot: paid.resolvedSlot ?? null,
 
-            // stable winner snapshot (preferred by UI)
-            winner: paid.winner ?? null,
+        // stable winner snapshot (preferred by UI)
+        winner: paid.winner ?? null,
 
-            // optional back-compat convenience
-            daily4Draws,
+        // optional back-compat convenience
+        daily4Draws,
 
-            guaranteedPrizeCents: paidGuaranteed,
-            bonusPrizeCents: paidBonus,
-            finalPrizeCents: paidFinal,
+        guaranteedPrizeCents: paidGuaranteed,
+        bonusPrizeCents: paidBonus,
+        finalPrizeCents: paidFinal,
 
-            prizeHeadline: String(paid.prizeHeadline || paid.headline || "").trim() || "$100 guaranteed + bonus",
-          }
-        : {
-            id: paidId,
-            mode: "DAILY4",
-            cutoffAt: cutoffAt,
-            endsOnMs,
-            endsOn: endsOnText,
-
-            resolved: false,
-            resolvedAt: null,
-            targetNumber: null,
-
-            targets: {},
-            projectedWinner: null,
-            resolvedBy: null,
-            resolvedSlot: null,
-            winner: null,
-
-            daily4Draws: { morning: null, day: null, evening: null, night: null },
-
-            guaranteedPrizeCents: 0,
-            bonusPrizeCents: 0,
-            finalPrizeCents: 0,
-
-            prizeHeadline: "$100 guaranteed + bonus",
-          },
+        prizeHeadline: String(paid.prizeHeadline || paid.headline || "").trim() || "$100 guaranteed + bonus",
+      },
 
       // historical record (can differ from paid.winner if you ever change formats)
       paidWinner,
@@ -447,7 +448,7 @@ r.get("/api/reveal-state", async (req, res) => {
 /* =========================================================
    MY ENTRY — AUTH REQUIRED
    ✅ contestEndsOn computed from cutoffAt (never stale strings)
-   ✅ default contest for Reveal should be the MOST RECENTLY CLOSED contest
+   ✅ default contest should be contest/current (manual weekly lifecycle)
 ========================================================= */
 
 r.get("/api/my-entry", requireUser, async (req, res) => {
@@ -471,8 +472,8 @@ r.get("/api/my-entry", requireUser, async (req, res) => {
       const cutoffAt = c.cutoffAt ?? null;
       contestEndsOn = cutoffAt ? mmddyyyyFromCutoffMs(cutoffAt) : null;
     } else {
-      // ✅ Default to reveal contest (most recently closed), not the upcoming contest
-      const contest = await ensureRevealContestNow();
+      // ✅ Default to contest/current (manual weekly lifecycle), never cutoff-based selection
+      const contest = await getCurrentContestStrict();
       if (!contest || !contest.id) return res.json({ ok: false });
 
       contestId = contest.id;

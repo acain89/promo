@@ -61,7 +61,8 @@ function msFromParts(days, hours, minutes) {
 
 /* =========================================================
    DEFAULT SCHEDULE
-   - Close: Saturday cutoff time (cutoffAt)
+   - Close: Saturday 9:00 AM (cutoffAt)
+   - Reopen: Saturday 10:30 PM (startMs)
    - Window is:
        startMs = cutoffAt - 6d 10h 30m
        endMs   = cutoffAt
@@ -331,8 +332,10 @@ export async function ensureContestForCutoff(cutoffAtMs) {
 }
 
 /* =========================================================
-   ACTIVE CONTEST SELECTION
-   - "active contest" for ENTRY/PROFILE/CHECKOUT: next cutoff after now
+   ACTIVE CONTEST SELECTION (FIXED)
+   ✅ Correct for your weekly flow:
+   - Prefer contest/current ONLY if it is still active.
+   - Otherwise: active contest is the one for the NEXT cutoff after now.
 ========================================================= */
 
 const CURRENT_REF = () => db().collection("contest").doc("current");
@@ -354,22 +357,10 @@ function isContestStillActive(contest, atMs) {
   return t < end + 2 * 60 * 1000;
 }
 
-async function maybeActivateContest(contest, atMs) {
-  if (!contest) return contest;
-  if (contest.activatedAt) return contest;
-  try {
-    await db().collection("contests").doc(contest.id).set({ activatedAt: atMs }, { merge: true });
-    return { ...contest, activatedAt: atMs };
-  } catch {
-    return contest;
-  }
-}
-
 export async function ensureActiveContestNow() {
   const now = nowMs();
 
-  // 0) If contest/current exists and points to a still-active contest, use it.
-  // (This is a consistency optimization; not the primary rule.)
+  // 0) If contest/current exists and points to a STILL-ACTIVE contest, use it.
   try {
     const curSnap = await CURRENT_REF().get();
     if (curSnap.exists) {
@@ -378,10 +369,17 @@ export async function ensureActiveContestNow() {
 
       if (curId) {
         const cSnap = await db().collection("contests").doc(curId).get();
+
         if (cSnap.exists) {
           const contest = { id: cSnap.id, ...(cSnap.data() || {}) };
+
+          // ✅ NEW: do not trust contest/current if it’s expired or resolved
           if (isContestStillActive(contest, now)) {
-            return await maybeActivateContest(contest, now);
+            if (!contest.activatedAt) {
+              await db().collection("contests").doc(contest.id).set({ activatedAt: now }, { merge: true });
+              return { ...contest, activatedAt: now };
+            }
+            return contest;
           }
         }
       }
@@ -395,46 +393,23 @@ export async function ensureActiveContestNow() {
   const active = await ensureContestForCutoff(nextCutoff);
 
   // Persist pointer for consistency across servers/clients.
-  try {
-    await CURRENT_REF().set(
-      {
-        contestId: active.id,
-        cutoffAt: active.cutoffAt,
-        endsOn: active.endsOn,
-        mode: active.mode || "DAILY4",
-        updatedAt: now,
-      },
-      { merge: true }
-    );
-  } catch {
-    // best-effort
+  await CURRENT_REF().set(
+    {
+      contestId: active.id,
+      cutoffAt: active.cutoffAt,
+      endsOn: active.endsOn,
+      mode: active.mode || "DAILY4",
+      updatedAt: now,
+    },
+    { merge: true }
+  );
+
+  if (!active.activatedAt) {
+    await db().collection("contests").doc(active.id).set({ activatedAt: now }, { merge: true });
+    return { ...active, activatedAt: now };
   }
 
-  return await maybeActivateContest(active, now);
-}
-
-/* =========================================================
-   REVEAL CONTEST SELECTION (THIS FIXES YOUR 02/28 vs 03/07 ISSUE)
-   - Reveal should show:
-     - the current entry contest IF it's open right now
-     - otherwise, the most recent cutoff contest (the game you are revealing)
-========================================================= */
-
-export async function ensureRevealContestNow() {
-  const now = nowMs();
-
-  const nextCutoff = nextChicagoCutoffAfter(now);
-  const nextContest = await ensureContestForCutoff(nextCutoff);
-
-  // If entries are currently open for the next contest, Reveal should reference it.
-  if (isRegistrationOpenAt(nextContest, now)) {
-    return await maybeActivateContest(nextContest, now);
-  }
-
-  // Otherwise (between close and reopen), show the most recent contest (the one users perceive as "current").
-  const lastCutoff = mostRecentChicagoCutoffAtOrBefore(now);
-  const lastContest = await ensureContestForCutoff(lastCutoff);
-  return await maybeActivateContest(lastContest, now);
+  return active;
 }
 
 export async function getContestForEntryTime(entryMs) {
