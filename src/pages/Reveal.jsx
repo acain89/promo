@@ -14,12 +14,36 @@ function pad4(raw) {
   return d.slice(-4).padStart(4, "0");
 }
 
-function formatDateTime(ts) {
+function formatDateTimeChicago(ts) {
   if (!ts) return "";
   try {
-    const d = new Date(ts);
+    const d = new Date(Number(ts));
     if (Number.isNaN(d.getTime())) return "";
-    return d.toLocaleString();
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Chicago",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit",
+    }).format(d);
+  } catch {
+    return "";
+  }
+}
+
+function formatDateChicago(ts) {
+  if (!ts) return "";
+  try {
+    const d = new Date(Number(ts));
+    if (Number.isNaN(d.getTime())) return "";
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Chicago",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(d);
   } catch {
     return "";
   }
@@ -70,9 +94,7 @@ function normalizeDraws(rs) {
   const paid = rs?.paid && typeof rs.paid === "object" ? rs.paid : null;
   const targets = paid?.targets && typeof paid.targets === "object" ? paid.targets : null;
 
-  // If exact match ended early, later draws are not recorded (and should not display)
-  const resolvedSlot =
-    paid?.resolved && paid?.resolvedSlot != null ? Number(paid.resolvedSlot) : null;
+  const resolvedSlot = paid?.resolved && paid?.resolvedSlot != null ? Number(paid.resolvedSlot) : null;
   const endedEarly =
     paid?.resolved &&
     resolvedSlot != null &&
@@ -83,10 +105,7 @@ function normalizeDraws(rs) {
   if (targets) {
     for (const slotStr of ["1", "2", "3", "4"]) {
       const slotNum = Number(slotStr);
-      if (endedEarly && slotNum > resolvedSlot) {
-        // Game ended early: remaining draws are not recorded
-        continue;
-      }
+      if (endedEarly && slotNum > resolvedSlot) continue;
 
       const t = targets?.[slotStr];
       const v = t?.target ?? t?.value ?? t?.number ?? null;
@@ -172,16 +191,11 @@ function StatPill({ label, value }) {
         minHeight: 60,
         display: "grid",
         alignContent: "center",
-
-        // NEW: always “gamey” even when blank
         background: isBlank ? "rgba(18,24,34,0.55)" : "rgba(18,24,34,0.70)",
         border: isBlank ? `1px solid rgba(24,242,213,0.22)` : `1px solid rgba(24,242,213,0.44)`,
-
         boxShadow: isBlank
           ? "0 10px 18px rgba(0,0,0,0.30), 0 0 10px rgba(24,242,213,0.10)"
           : `0 10px 18px rgba(0,0,0,0.32), 0 0 16px ${REVEAL_GLOW}`,
-
-        // Soft “pending” pulse only when blank (subtle)
         animation: isBlank ? "revealPending 2.8s ease-in-out infinite" : "none",
       }}
     >
@@ -215,6 +229,7 @@ function StatPill({ label, value }) {
     </div>
   );
 }
+
 function Row({ label, value }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", gap: 10, lineHeight: 1.1 }}>
@@ -224,6 +239,19 @@ function Row({ label, value }) {
       </span>
     </div>
   );
+}
+
+function formatCountdown(msLeft) {
+  if (msLeft == null) return "—";
+  const n = Math.max(0, Math.floor(msLeft / 1000)); // seconds
+  const dd = Math.floor(n / 86400);
+  const hh = Math.floor((n % 86400) / 3600);
+  const mm = Math.floor((n % 3600) / 60);
+  const ss = n % 60;
+
+  const pad2 = (x) => String(x).padStart(2, "0");
+  if (dd > 0) return `${dd}d ${pad2(hh)}:${pad2(mm)}:${pad2(ss)}`;
+  return `${pad2(hh)}:${pad2(mm)}:${pad2(ss)}`;
 }
 
 export default function Reveal() {
@@ -238,15 +266,18 @@ export default function Reveal() {
   const [state, setState] = useState(null);
   const [draws, setDraws] = useState({ morning: "—", day: "—", evening: "—", night: "—" });
 
-  // Projected winner (public) or final winner after resolve
   const [proj, setProj] = useState(null);
-
-  // My status (requires login)
   const [meUser, setMeUser] = useState(null);
   const [myEntry, setMyEntry] = useState(null);
 
   const pollRef = useRef(null);
   const mountedRef = useRef(false);
+
+  // For unified countdown (serverNow anchored)
+  const tickRef = useRef(null);
+  const baseServerNowRef = useRef(null);
+  const baseClientNowRef = useRef(null);
+  const [uiNow, setUiNow] = useState(Date.now());
 
   async function doLogout() {
     try {
@@ -258,6 +289,29 @@ export default function Reveal() {
       setBusy(false);
       nav("/");
     }
+  }
+
+  function startClockFromServerNow(serverNowMs) {
+    const sNow = Number(serverNowMs || 0);
+    if (!Number.isFinite(sNow) || sNow <= 0) {
+      baseServerNowRef.current = null;
+      baseClientNowRef.current = null;
+      return;
+    }
+    baseServerNowRef.current = sNow;
+    baseClientNowRef.current = Date.now();
+
+    if (tickRef.current) clearInterval(tickRef.current);
+    tickRef.current = setInterval(() => {
+      const baseS = baseServerNowRef.current;
+      const baseC = baseClientNowRef.current;
+      if (!baseS || !baseC) {
+        setUiNow(Date.now());
+        return;
+      }
+      const elapsed = Date.now() - baseC;
+      setUiNow(baseS + elapsed);
+    }, 1000);
   }
 
   async function refresh({ silent = false } = {}) {
@@ -282,12 +336,15 @@ export default function Reveal() {
       const rs = await apiGet("/api/reveal-state");
       setState(rs && typeof rs === "object" ? rs : null);
 
+      // Anchor countdown to server time if available
+      const serverNowMs = rs?.serverNow ?? rs?.nowMs ?? rs?.timeMs ?? rs?.serverTimeMs ?? null;
+      if (serverNowMs) startClockFromServerNow(serverNowMs);
+      else setUiNow(Date.now());
+
       setDraws(normalizeDraws(rs));
 
       const paid = rs?.paid && typeof rs.paid === "object" ? rs.paid : null;
 
-      // Prefer: paid.winner (stable snapshot) after resolve, else paid.projectedWinner during collecting,
-      // fallback to legacy top-level shapes if present.
       const winnerObj = paid?.winner || null;
       const projectedObj = paid?.projectedWinner || null;
 
@@ -356,6 +413,7 @@ export default function Reveal() {
       mountedRef.current = false;
       document.removeEventListener("visibilitychange", onVis);
       if (pollRef.current) clearInterval(pollRef.current);
+      if (tickRef.current) clearInterval(tickRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -376,19 +434,6 @@ export default function Reveal() {
     if (t.includes("night")) return "Night";
     return proj.bestDraw;
   }, [proj?.bestDraw]);
-
-  // Week-ending should now come correctly from backend (computed from cutoffAt)
-  const endsOnRaw =
-    state?.paid?.endsOn ||
-    state?.endsOn ||
-    state?.contest?.endsOn ||
-    state?.contest?.endsOnText ||
-    null;
-
-  const endsOn = useMemo(() => {
-    const s = String(endsOnRaw || "").trim();
-    return s ? s : null;
-  }, [endsOnRaw]);
 
   const myUsername = useMemo(() => {
     const u = meUser;
@@ -423,7 +468,73 @@ export default function Reveal() {
     cursor: "pointer",
   };
 
-  const paidResolved = !!state?.paid?.resolved;
+  const paid = state?.paid && typeof state.paid === "object" ? state.paid : null;
+  const paidResolved = !!paid?.resolved;
+
+  // ✅ Single source of truth for "this contest's end"
+  const contestEndMs = useMemo(() => {
+    const manualEnabled = !!paid?.manualWindowEnabled;
+    const manualEnd = Number(paid?.manualEndMs ?? 0);
+    const endMs = Number(paid?.endMs ?? paid?.end ?? 0);
+    const cutoffAt = Number(paid?.cutoffAt ?? state?.cutoffAt ?? 0);
+
+    if (manualEnabled && Number.isFinite(manualEnd) && manualEnd > 0) return manualEnd;
+    if (Number.isFinite(endMs) && endMs > 0) return endMs;
+    if (Number.isFinite(cutoffAt) && cutoffAt > 0) return cutoffAt;
+    return null;
+  }, [paid?.manualWindowEnabled, paid?.manualEndMs, paid?.endMs, paid?.end, paid?.cutoffAt, state?.cutoffAt]);
+
+  const contestStartMs = useMemo(() => {
+    const manualEnabled = !!paid?.manualWindowEnabled;
+    const manualStart = Number(paid?.manualStartMs ?? 0);
+    const startMs = Number(paid?.startMs ?? paid?.start ?? 0);
+
+    if (manualEnabled && Number.isFinite(manualStart) && manualStart > 0) return manualStart;
+    if (Number.isFinite(startMs) && startMs > 0) return startMs;
+    return null;
+  }, [paid?.manualWindowEnabled, paid?.manualStartMs, paid?.startMs, paid?.start]);
+
+  const weekEnding = useMemo(() => {
+    if (contestEndMs) return formatDateChicago(contestEndMs);
+    // LAST RESORT fallback (display only)
+    const s =
+      String(
+        state?.paid?.endsOn ||
+          state?.endsOn ||
+          state?.contest?.endsOn ||
+          state?.contest?.endsOnText ||
+          ""
+      ).trim();
+    return s || null;
+  }, [contestEndMs, state]);
+
+  const countdown = useMemo(() => {
+    if (!contestEndMs) return "—";
+    const msLeft = Number(contestEndMs) - Number(uiNow || Date.now());
+    return formatCountdown(msLeft);
+  }, [contestEndMs, uiNow]);
+
+  const contestId = useMemo(() => {
+    return (
+      String(paid?.id || paid?.contestId || state?.contestId || state?.paidContestId || "").trim() || null
+    );
+  }, [paid?.id, paid?.contestId, state?.contestId, state?.paidContestId]);
+
+  const amoeCycleId = useMemo(() => {
+    const v = state?.amoe?.cycleId ?? state?.amoeCycleId ?? null;
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }, [state?.amoe?.cycleId, state?.amoeCycleId]);
+
+  const amoeCount = useMemo(() => {
+    const n = Number(state?.amoe?.count ?? state?.amoeCount ?? 0);
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  }, [state?.amoe?.count, state?.amoeCount]);
+
+  const amoeTargetCount = useMemo(() => {
+    const n = Number(state?.amoe?.targetCount ?? state?.amoeTargetCount ?? 0);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }, [state?.amoe?.targetCount, state?.amoeTargetCount]);
 
   const winnerBoxStyle = paidResolved
     ? {
@@ -504,11 +615,61 @@ export default function Reveal() {
           </div>
         </div>
 
-        {endsOn ? (
-          <div className="miniMuted" style={{ textAlign: "center" }}>
-            Week ending <strong>{endsOn}</strong>
+        {/* ✅ Unified banner: week ending + countdown + contest/cycle */}
+        <div
+          style={{
+            textAlign: "center",
+            padding: "10px 12px",
+            borderRadius: 14,
+            border: "1px solid rgba(255,255,255,0.10)",
+            background: "rgba(18,24,34,0.46)",
+            boxShadow: "0 10px 18px rgba(0,0,0,0.22)",
+            display: "grid",
+            gap: 6,
+          }}
+        >
+          {weekEnding ? (
+            <div className="miniMuted">
+              Week ending <strong>{weekEnding}</strong>
+            </div>
+          ) : null}
+
+          <div style={{ fontSize: 12, letterSpacing: "0.12em", opacity: 0.9 }}>
+            <span style={{ color: "rgba(231,235,243,0.72)" }}>TIME LEFT:</span>{" "}
+            <span style={{ fontWeight: 900, color: REVEAL_ACCENT }}>{countdown}</span>
           </div>
-        ) : null}
+
+          <div style={{ fontSize: 11, opacity: 0.78, letterSpacing: "0.08em" }}>
+            {contestId ? (
+              <span>
+                CONTEST <strong>{contestId}</strong>
+              </span>
+            ) : (
+              <span>CONTEST —</span>
+            )}
+            {"  "}•{"  "}
+            {amoeCycleId ? (
+              <span>
+                AMOE CYCLE <strong>{amoeCycleId}</strong>
+              </span>
+            ) : (
+              <span>AMOE CYCLE —</span>
+            )}
+            {"  "}•{"  "}
+            <span>
+              AMOE {amoeCount}
+              {amoeTargetCount ? `/${amoeTargetCount}` : ""}
+            </span>
+          </div>
+
+          {(contestStartMs || contestEndMs) && (
+            <div style={{ fontSize: 11, opacity: 0.65 }}>
+              {contestStartMs ? `Opens (CT): ${formatDateTimeChicago(contestStartMs)}` : ""}
+              {contestStartMs && contestEndMs ? " • " : ""}
+              {contestEndMs ? `Closes (CT): ${formatDateTimeChicago(contestEndMs)}` : ""}
+            </div>
+          )}
+        </div>
 
         {loading ? <div className="fineprint">Loading…</div> : null}
         {err ? <div className="error">{err}</div> : null}
@@ -577,7 +738,7 @@ export default function Reveal() {
                 {proj.timestamp ? (
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
                     <span className="label">Timestamp</span>
-                    <span className="value">{formatDateTime(proj.timestamp) || "—"}</span>
+                    <span className="value">{formatDateTimeChicago(proj.timestamp) || "—"}</span>
                   </div>
                 ) : null}
 
@@ -646,7 +807,7 @@ export default function Reveal() {
               <Row label="Entry:" value={myStats?.guess && myStats.guess !== "—" ? myStats.guess : ""} />
               <Row
                 label="Timestamp:"
-                value={formatDateTime(myEntry?.timestamp || myEntry?.submittedAt || myEntry?.entryTimestamp || "")}
+                value={formatDateTimeChicago(myEntry?.timestamp || myEntry?.submittedAt || myEntry?.entryTimestamp || "")}
               />
 
               <Row label="DFT Morning:" value={dftLine("morning")} />
@@ -654,10 +815,7 @@ export default function Reveal() {
               <Row label="DFT Evening:" value={dftLine("evening")} />
               <Row label="DFT Night:" value={dftLine("night")} />
 
-              <Row
-                label="Current Winner:"
-                value={isCurrentWinner === null ? "" : isCurrentWinner ? "Yes" : "No"}
-              />
+              <Row label="Current Winner:" value={isCurrentWinner === null ? "" : isCurrentWinner ? "Yes" : "No"} />
             </div>
           )}
         </div>
