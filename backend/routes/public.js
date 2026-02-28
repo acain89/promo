@@ -108,6 +108,32 @@ function targetsToDaily4Draws(targets, resolvedSlot) {
   return out;
 }
 
+function dollarsFromCents(cents) {
+  const n = Number(cents || 0);
+  const v = Number.isFinite(n) ? n : 0;
+  return (v / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
+}
+
+/**
+ * Prize headline builder:
+ * - If admin sets contest.prizeHeadline or contest.headline, respect it.
+ * - Otherwise auto-generate from guaranteed/bonus cents to avoid mismatches.
+ */
+function buildPrizeHeadline(contest, guaranteedPrizeCents, bonusPrizeCents) {
+  const manual = String(contest?.prizeHeadline || contest?.headline || "").trim();
+  if (manual) return manual;
+
+  const g = Number(guaranteedPrizeCents || 0);
+  const b = Number(bonusPrizeCents || 0);
+
+  if (g > 0 && b > 0) return `${dollarsFromCents(g)} guaranteed + ${dollarsFromCents(b)} bonus`;
+  if (g > 0) return `${dollarsFromCents(g)} guaranteed`;
+  if (b > 0) return `${dollarsFromCents(b)} bonus`;
+
+  // Ultimate fallback if nothing is configured
+  return "$100 guaranteed + bonus";
+}
+
 /* =========================================================
    REVEAL CONTEST SELECTION
 ========================================================= */
@@ -150,8 +176,10 @@ r.get("/api/contest", async (req, res) => {
     const bonusPrizeCents = Number(contest.bonusPrizeCents || 0);
     const finalPrizeCents = Number(contest.finalPrizeCents || 0) || guaranteedPrizeCents + bonusPrizeCents;
 
-    // Landing headline text (lets Admin change copy without a frontend deploy)
-    const prizeHeadline = String(contest.prizeHeadline || contest.headline || "").trim() || "$100 guaranteed + bonus";
+    // ✅ Landing headline text:
+    // - prefer admin-provided contest.prizeHeadline/headline
+    // - otherwise auto-generate from guaranteed/bonus to prevent mismatch
+    const prizeHeadline = buildPrizeHeadline(contest, guaranteedPrizeCents, bonusPrizeCents);
 
     // ✅ Effective registration window (manual wins)
     const win = getRegistrationWindow(contest);
@@ -420,7 +448,8 @@ r.get("/api/reveal-state", async (req, res) => {
       bonusPrizeCents: paidBonus,
       finalPrizeCents: paidFinal,
 
-      prizeHeadline: String(paid.prizeHeadline || paid.headline || "").trim() || "$100 guaranteed + bonus",
+      // ✅ Same exact headline logic as landing (avoids mismatches)
+      prizeHeadline: buildPrizeHeadline(paid, paidGuaranteed, paidBonus),
     };
 
     return res.json({
