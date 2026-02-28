@@ -798,9 +798,13 @@ async function endNow() {
 }
 
   // Current Game panel values (best-effort)
-  const paidEntryCount = Number(active?.entryCount || 0);
-  const paidEntryPriceUsd = 10;
-  const paidAmountUsd = paidEntryCount * paidEntryPriceUsd;
+  // Current Game panel values (best-effort)
+const paidEntryCount = Number(active?.entryCount || 0);
+const amoeEntryCount = Number(amoe?.count || 0);
+const totalEntryCount = paidEntryCount + amoeEntryCount;
+
+const paidEntryPriceUsd = 10;
+const paidAmountUsd = paidEntryCount * paidEntryPriceUsd;
 
   const resolved = !!active?.resolved;
 
@@ -1045,9 +1049,19 @@ async function endNow() {
 
               <div style={{ display: "grid", gap: 6 }}>
                 <div style={compactRow}>
-                  <span className="label">Paid Entries</span>
-                  <span className="value">{Number.isFinite(paidEntryCount) ? paidEntryCount : 0}</span>
-                </div>
+  <span className="label">Total Entries (Paid + AMOE)</span>
+  <span className="value">{Number.isFinite(totalEntryCount) ? totalEntryCount : 0}</span>
+</div>
+
+<div style={compactRow}>
+  <span className="label">Paid Entries</span>
+  <span className="value">{Number.isFinite(paidEntryCount) ? paidEntryCount : 0}</span>
+</div>
+
+<div style={compactRow}>
+  <span className="label">AMOE Entries</span>
+  <span className="value">{Number.isFinite(amoeEntryCount) ? amoeEntryCount : 0}</span>
+</div>
 
                 <div style={compactRow}>
                   <span className="label">Dollar Amount</span>

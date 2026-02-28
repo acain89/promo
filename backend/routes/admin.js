@@ -702,8 +702,8 @@ r.post(
           endsOn: active.endsOn ?? null,
           resolved: !!active.resolved,
           resolvedAt: active.resolvedAt ?? null,
-          startMs: active.startMs ?? active.start ?? null,
-          endMs: active.endMs ?? active.end ?? null,
+          startMs: (active.manualWindowEnabled ? active.manualStartMs : active.startMs) ?? active.start ?? null,
+          endMs: (active.manualWindowEnabled ? active.manualEndMs : active.endMs) ?? active.end ?? null,
 
           manualWindowEnabled: !!active.manualWindowEnabled,
           manualStartMs: active.manualStartMs ?? null,
@@ -766,15 +766,49 @@ async function computeUnifiedBest({ contestId, targetNumber }) {
   const target = parse4DigitNumber(targetNumber);
   if (target == null) throw new Error("Invalid target. Must be exactly 4 digits (0000–9999).");
 
+  // 1) Primary: contest-mirrored entries (paid + AMOE mirror)
   const entriesSnap = await db().collection("entries").doc(contestId).collection("items").get();
-  if (entriesSnap.empty) throw new Error("No entries.");
 
+  // 2) Fallback: if mirrors are missing/empty, compute from current AMOE cycle directly
+  let docs = entriesSnap.docs;
   let totalEntries = entriesSnap.size;
+  let sourceHint = "CONTEST";
+
+  if (!docs.length) {
+    const { state: amoeState } = await getOrInitAmoeState();
+    const cycleId = Number(amoeState.cycleId || 1);
+
+    const amSnap = await db().collection("amoeEntries").doc(String(cycleId)).collection("items").get();
+    docs = amSnap.docs;
+    totalEntries = amSnap.size;
+    sourceHint = "AMOE_FALLBACK";
+
+    if (!docs.length) throw new Error("No entries.");
+  }
+
   let eligibleCount = 0;
   let best = null;
 
-  entriesSnap.forEach((doc) => {
-    const e = doc.data();
+  docs.forEach((doc) => {
+    const e0 = doc.data() || {};
+
+    // If coming from AMOE fallback, normalize fields so unify logic works
+    const e =
+      sourceHint === "AMOE_FALLBACK"
+        ? {
+            ...e0,
+            paid: false,
+            status: "AMOE",
+            source: "AMOE",
+            isAmoe: true,
+            countedInContest: true,
+            // for tie-break + UX
+            username: e0.name || e0.username || e0.email || "—",
+            timestamp: e0.timestamp || e0.receivedAt || e0.createdAt || 0,
+            createdAt: e0.createdAt || e0.receivedAt || 0,
+          }
+        : e0;
+
     if (!isUnifiedEligible(e)) return;
 
     const guessNum = parse4DigitNumber(e.guess);
