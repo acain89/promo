@@ -21,7 +21,7 @@ import { onlyDigits, normalizeNumber, absDiff, nowMs } from "../lib/utils.js";
 
 import {
   ensureActiveContestNow,
-  ensureContestForCutoff, // ✅ NEW: use endMs as cutoff to create the next contest deterministically
+  ensureContestForCutoff, // ✅ create contest deterministically by cutoff
   mostRecentChicagoCutoffAtOrBefore,
   contestIdFromCutoffMs,
   getOrInitAmoeState,
@@ -193,11 +193,7 @@ async function deleteQueryInBatches(query, batchSize = 400) {
 
 async function trimByResolvedAt(collectionName, keep = HISTORY_LIMIT) {
   const cap = Math.max(0, Number(keep || 0));
-  const snap = await db()
-    .collection(collectionName)
-    .orderBy("resolvedAt", "desc")
-    .limit(cap + 300)
-    .get();
+  const snap = await db().collection(collectionName).orderBy("resolvedAt", "desc").limit(cap + 300).get();
 
   if (snap.empty) return 0;
 
@@ -416,9 +412,7 @@ async function buildAuditPack({ contestId, amoeCycleId }) {
     .limit(1)
     .get();
 
-  const amoeWinner = amoeWinnerSnap.empty
-    ? null
-    : { id: amoeWinnerSnap.docs[0].id, ...amoeWinnerSnap.docs[0].data() };
+  const amoeWinner = amoeWinnerSnap.empty ? null : { id: amoeWinnerSnap.docs[0].id, ...amoeWinnerSnap.docs[0].data() };
 
   const totalPaidCents = await getTotalPaidCents();
   const prizeCfg = await getPrizeConfig();
@@ -663,7 +657,7 @@ r.post(
         return res.status(500).json({ error: "Active contest not available." });
       }
 
-      // Ensure Daily4-only (best-effort)
+      // Ensure Daily4-only (best-effort) — DO NOT mutate window here.
       try {
         if (String(active.mode || "").toUpperCase() !== "DAILY4") {
           await db().collection("contests").doc(active.id).set({ mode: "DAILY4" }, { merge: true });
@@ -1009,11 +1003,7 @@ r.post(
         return res.json({ ok: true, ...result, winnerRecord: record });
       }
 
-      await auditLog(
-        "admin_targets_submit",
-        { contestId: result.contestId, slot: result.slot, target: result.target, exactHit: false },
-        req
-      );
+      await auditLog("admin_targets_submit", { contestId: result.contestId, slot: result.slot, target: result.target, exactHit: false }, req);
 
       return res.json({ ok: true, ...result });
     } catch (e) {
@@ -1078,12 +1068,17 @@ r.post(
   rateLimit({ routeKey: "admin_schedule_commit", limit: 1000, windowMs: 15 * 60 * 1000 }),
   async (req, res) => {
     try {
-      const { startMs, endMs } = req.body || {};
+      const { startMs } = req.body || {};
 
       const s = parseMs(startMs);
-      const e = parseMs(endMs);
+      if (!s) throw new Error("Invalid startMs.");
 
-      if (!s || !e) throw new Error("Invalid start/end.");
+      // ✅ FORCE RULE (canonical via existing cutoff logic):
+      // Registration ALWAYS ends at the next Saturday 9:00 AM Chicago cutoff after startMs.
+      const lastCutoffAtOrBeforeStart = mostRecentChicagoCutoffAtOrBefore(s);
+      const e = Number(lastCutoffAtOrBeforeStart || 0) + 7 * 24 * 60 * 60 * 1000;
+
+      if (!e) throw new Error("Invalid computed endMs.");
       if (e <= s) throw new Error("end must be after start.");
 
       // ---------- CURRENT CONTEST ----------
@@ -1098,7 +1093,7 @@ r.post(
         amoeCycleId: amoeState.cycleId,
       });
 
-            // ---------- LOCK ENTRIES (DO NOT RESOLVE CONTEST) ----------
+      // ---------- LOCK ENTRIES (DO NOT RESOLVE CONTEST) ----------
       // DrawnFray rule: cutoff closes entries, but contest remains unresolved until you post draws.
       // We only update the registration window; we do NOT set resolved/resolvedAt/resolvedBy/resolvedSlot.
       await db()
@@ -1109,6 +1104,9 @@ r.post(
             mode: "DAILY4",
             startMs: s,
             endMs: e,
+            manualWindowEnabled: true,
+            manualStartMs: s,
+            manualEndMs: e,
             // optional debug stamp (safe)
             rolloverCommittedAt: nowMs(),
             rolloverCommitBy: "ADMIN_SCHEDULE_COMMIT",
@@ -1116,13 +1114,8 @@ r.post(
           { merge: true }
         );
 
-      // IMPORTANT: refresh active contest pointer/window
-      await ensureActiveContestNow();
-
-      // ---------- NEXT CONTEST ----------
-      const nextCutoff = Number(active.cutoffAt || 0) + 7 * 24 * 60 * 60 * 1000;
-
-      const next = await ensureContestForCutoff(nextCutoff);
+      // ---------- NEXT CONTEST (deterministic by cutoff = e) ----------
+      const next = await ensureContestForCutoff(e);
       if (!next?.id) throw new Error("Next contest missing.");
 
       await setManualRegistrationWindow(next.id, s, e, true);
@@ -1135,6 +1128,10 @@ r.post(
             mode: "DAILY4",
             startMs: s,
             endMs: e,
+            manualWindowEnabled: true,
+            manualStartMs: s,
+            manualEndMs: e,
+
             resolved: false,
             resolvedAt: null,
             resolvedBy: null,
@@ -1158,6 +1155,8 @@ r.post(
         ok: true,
         prevContestId: active.id,
         nextContestId: next.id,
+        startMs: s,
+        endMs: e,
         auditPack,
         ...amoeRoll,
       });
@@ -1227,14 +1226,8 @@ r.post(
       const deletedContestEntries = await deleteCollectionInBatches(entriesCol, 400);
 
       // ✅ IMPORTANT: also wipe uniqueness indexes so "reset-all" truly resets
-      const deletedGuessIndex = await deleteCollectionInBatches(
-        db().collection("entries").doc(id).collection("guessIndex"),
-        400
-      );
-      const deletedEmailIndex = await deleteCollectionInBatches(
-        db().collection("entries").doc(id).collection("emailIndex"),
-        400
-      );
+      const deletedGuessIndex = await deleteCollectionInBatches(db().collection("entries").doc(id).collection("guessIndex"), 400);
+      const deletedEmailIndex = await deleteCollectionInBatches(db().collection("entries").doc(id).collection("emailIndex"), 400);
 
       const winnersQuery = db().collection("winners").where("contestId", "==", id);
       const deletedWinnerRecords = await deleteQueryInBatches(winnersQuery, 400);
@@ -1545,26 +1538,14 @@ r.post(
       const contestId = active.id;
 
       // deterministic index locations (SAME SYSTEM AS PAID CONFIRM)
-      const guessIndexRef = db()
-        .collection("entries")
-        .doc(contestId)
-        .collection("guessIndex")
-        .doc(String(guessNorm));
+      const guessIndexRef = db().collection("entries").doc(contestId).collection("guessIndex").doc(String(guessNorm));
 
       const contestRef = db().collection("contests").doc(contestId);
       const emailKey = emailKeyFromLower(em);
-      const emailIndexRef = db()
-        .collection("entries")
-        .doc(contestId)
-        .collection("emailIndex")
-        .doc(emailKey);
+      const emailIndexRef = db().collection("entries").doc(contestId).collection("emailIndex").doc(emailKey);
 
       // refs
-      const amoeEntryRef = db()
-        .collection("amoeEntries")
-        .doc(String(cycleId))
-        .collection("items")
-        .doc();
+      const amoeEntryRef = db().collection("amoeEntries").doc(String(cycleId)).collection("items").doc();
 
       const mirrorRef = db().collection("entries").doc(contestId).collection("items").doc();
 
@@ -1600,12 +1581,8 @@ r.post(
           createdAt: nowMs(),
         });
 
-          // ✅ increment live contest player count (so UI updates)
-tx.set(
-  contestRef,
-  { entryCount: admin.firestore.FieldValue.increment(1) },
-  { merge: true }
-);
+        // ✅ increment live contest player count (so UI updates)
+        tx.set(contestRef, { entryCount: admin.firestore.FieldValue.increment(1) }, { merge: true });
 
         // ----- Mirror into contest -----
         tx.create(mirrorRef, {
@@ -1631,7 +1608,7 @@ tx.set(
           amoeEntryId: amoeEntryRef.id,
         });
 
-        // ✅ 2-line upgrade: hard uniqueness via deterministic docs + tx.create()
+        // ✅ hard uniqueness via deterministic docs + tx.create()
         tx.create(emailIndexRef, {
           entryId: mirrorRef.id,
           contestId,
