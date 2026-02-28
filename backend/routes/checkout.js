@@ -9,7 +9,6 @@ import { FRONTEND_URL, UNPAID_EXPIRE_MS, BRAND_NAME, MODES } from "../lib/config
 import { db } from "../lib/firestore.js";
 import { auditLog } from "../lib/audit.js";
 import { onlyDigits, normalizeNumber, nowMs } from "../lib/utils.js";
-import { ensureActiveContestNow } from "../lib/time.js";
 import { stripe } from "../lib/stripe.js";
 import { ensureActiveContestNow, isRegistrationOpenAt } from "../lib/time.js";
 
