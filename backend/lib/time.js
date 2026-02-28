@@ -133,6 +133,11 @@ export function cutoffForEntryMs(entryMs) {
    REGISTRATION WINDOW (DEFAULT + MANUAL OVERRIDE)
 ========================================================= */
 
+/**
+ * Returns the authoritative registration window for a contest.
+ * If manualWindowEnabled is true AND manualStart/End are valid, manual wins.
+ * Otherwise we fall back to explicit startMs/endMs if present, else defaults from cutoffAt.
+ */
 export function getRegistrationWindow(contest) {
   if (!contest) return { startMs: null, endMs: null, source: "none" };
 
@@ -140,7 +145,13 @@ export function getRegistrationWindow(contest) {
   const mStart = Number(contest.manualStartMs || 0);
   const mEnd = Number(contest.manualEndMs || 0);
 
-  if (manualEnabled && Number.isFinite(mStart) && Number.isFinite(mEnd) && mStart > 0 && mEnd > mStart) {
+  if (
+    manualEnabled &&
+    Number.isFinite(mStart) &&
+    Number.isFinite(mEnd) &&
+    mStart > 0 &&
+    mEnd > mStart
+  ) {
     return { startMs: mStart, endMs: mEnd, source: "manual" };
   }
 
@@ -150,10 +161,31 @@ export function getRegistrationWindow(contest) {
   // IMPORTANT:
   // If startMs/endMs were explicitly written on the contest doc (admin override),
   // use those directly. Otherwise use defaults derived from cutoff.
-  const startMs = Number(contest.startMs || 0) || defaultStartMsFromCutoff(cutoffAt);
-  const endMs = Number(contest.endMs || 0) || defaultEndMsFromCutoff(cutoffAt);
+  const explicitStart = Number(contest.startMs || 0);
+  const explicitEnd = Number(contest.endMs || 0);
 
-  return { startMs, endMs, source: contest.startMs || contest.endMs ? "explicit" : "default" };
+  const startMs = explicitStart || defaultStartMsFromCutoff(cutoffAt);
+  const endMs = explicitEnd || defaultEndMsFromCutoff(cutoffAt);
+
+  return { startMs, endMs, source: explicitStart || explicitEnd ? "explicit" : "default" };
+}
+
+/**
+ * The single, authoritative time values to use everywhere.
+ * This is mainly to prevent confusion between:
+ * - endMs
+ * - cutoffAt
+ * - manualEndMs
+ *
+ * Frontend should use effectiveEndMs for the countdown.
+ */
+export function getEffectiveWindow(contest) {
+  const win = getRegistrationWindow(contest);
+  return {
+    effectiveStartMs: win.startMs ?? null,
+    effectiveEndMs: win.endMs ?? null,
+    windowSource: win.source,
+  };
 }
 
 export function isRegistrationOpenAt(contest, atMs) {
@@ -161,10 +193,10 @@ export function isRegistrationOpenAt(contest, atMs) {
   if (!contest) return false;
   if (contest.resolved) return false;
 
-  const { startMs, endMs } = getRegistrationWindow(contest);
-  if (!startMs || !endMs) return false;
+  const { effectiveStartMs, effectiveEndMs } = getEffectiveWindow(contest);
+  if (!effectiveStartMs || !effectiveEndMs) return false;
 
-  return t >= startMs && t < endMs;
+  return t >= effectiveStartMs && t < effectiveEndMs;
 }
 
 export async function setManualRegistrationWindow(contestId, startMs, endMs, enabled) {
@@ -333,23 +365,16 @@ export async function ensureContestForCutoff(cutoffAtMs) {
 
 /* =========================================================
    ACTIVE CONTEST SELECTION (FIXED)
-   ✅ Correct for your weekly flow:
-   - Prefer contest/current ONLY if it is still active.
-   - Otherwise: active contest is the one for the NEXT cutoff after now.
 ========================================================= */
 
 const CURRENT_REF = () => db().collection("contest").doc("current");
 
 // A contest is "still active" if:
 // - not resolved
-// - regardless of cutoff passing (cutoff only closes entries)
-// This prevents contest/current from being discarded right after cutoff.
+// This mirrors your current design (you do not expire based on cutoff/endMs).
 function isContestStillActive(contest, atMs) {
   if (!contest) return false;
   if (contest.resolved) return false;
-
-  // Optional: if the contest is extremely old with no activity, you can fail closed.
-  // But for DrawnFray weekly flow, DO NOT expire based on endMs/cutoffAt.
   return true;
 }
 
@@ -369,7 +394,7 @@ export async function ensureActiveContestNow() {
         if (cSnap.exists) {
           const contest = { id: cSnap.id, ...(cSnap.data() || {}) };
 
-          // ✅ NEW: do not trust contest/current if it’s expired or resolved
+          // ✅ do not trust contest/current if it’s resolved
           if (isContestStillActive(contest, now)) {
             if (!contest.activatedAt) {
               await db().collection("contests").doc(contest.id).set({ activatedAt: now }, { merge: true });
@@ -418,22 +443,52 @@ export async function getContestForEntryTime(entryMs) {
   return contest;
 }
 
+/**
+ * What the client should rely on.
+ * - startMs/endMs in this payload are already the EFFECTIVE window (manual wins).
+ * - effectiveStartMs/effectiveEndMs are the explicit "single source of truth" fields for UI.
+ * - rawWindow/manualWindow are for debugging + admin sanity.
+ */
 export function safeContestForClient(contest) {
-  if (!contest) return { serverNow: nowMs(), ok: false };
+  const serverNow = nowMs();
+  if (!contest) return { serverNow, ok: false };
 
   const win = getRegistrationWindow(contest);
+  const eff = getEffectiveWindow(contest);
+
+  const rawStartMs = Number(contest.startMs || 0) || null;
+  const rawEndMs = Number(contest.endMs || 0) || null;
+
+  const manualEnabled = contest.manualWindowEnabled === true;
+  const manualStartMs = manualEnabled ? Number(contest.manualStartMs || 0) || null : null;
+  const manualEndMs = manualEnabled ? Number(contest.manualEndMs || 0) || null : null;
 
   return {
     ok: true,
-    serverNow: nowMs(),
+    serverNow,
+
     id: contest.id || null,
     mode: contest.mode || "DAILY4",
     cutoffAt: contest.cutoffAt ?? null,
     endsOn: contest.endsOn ?? null,
 
-    startMs: win.startMs ?? null,
-    endMs: win.endMs ?? null,
-    windowSource: win.source,
+    // Back-compat: these are already effective (manual wins)
+    startMs: eff.effectiveStartMs ?? null,
+    endMs: eff.effectiveEndMs ?? null,
+
+    // New: single-source-of-truth fields for timer logic
+    effectiveStartMs: eff.effectiveStartMs ?? null,
+    effectiveEndMs: eff.effectiveEndMs ?? null,
+    windowSource: eff.windowSource,
+
+    // Debug visibility (helps prevent "I changed endMs and nothing happened")
+    rawWindow: { startMs: rawStartMs, endMs: rawEndMs },
+    manualWindow: {
+      enabled: manualEnabled,
+      startMs: manualStartMs,
+      endMs: manualEndMs,
+      updatedAt: contest.manualWindowUpdatedAt ?? null,
+    },
 
     resolved: !!contest.resolved,
     resolvedAt: contest.resolvedAt ?? null,

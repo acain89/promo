@@ -110,22 +110,23 @@ export default function Landing() {
   }, []);
 
   // ✅ Timer source-of-truth:
-  // Prefer explicit cutoffAt if backend provides it, otherwise fall back to the active contest endMs/end.
-  const cutoffAt = useMemo(() => {
-    const v =
-      contest?.cutoffAt ??
-      contest?.activeContest?.endMs ??
-      contest?.activeContest?.end ??
-      contest?.endMs ??
-      contest?.end ??
-      null;
+// Countdown should always target the *effective* registration end (manual window wins).
+const endAtMs = useMemo(() => {
+  const v =
+    contest?.effectiveEndMs ??
+    contest?.endsOnMs ?? // back-compat from backend
+    contest?.endMs ??
+    contest?.activeContest?.endMs ??
+    contest?.activeContest?.end ??
+    contest?.end ??
+    null;
 
-    if (v == null) return null;
-    const n = Number(v);
-    return Number.isFinite(n) ? n : null;
-  }, [contest]);
+  if (v == null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}, [contest]);
 
-  const remaining = cutoffAt ? cutoffAt - now : null;
+const remaining = endAtMs ? endAtMs - now : null;
 
   // Admin can override later; safe fallback now.
   const prizeHeadline =
