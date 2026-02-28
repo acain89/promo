@@ -654,3 +654,19 @@ section{
   transform:translateY(-2px);
   transition:transform 180ms ease;
 }
+
+@keyframes revealPending {
+  0%,100% { box-shadow: 0 10px 18px rgba(0,0,0,0.30), 0 0 8px rgba(24,242,213,0.10); }
+  50%     { box-shadow: 0 10px 18px rgba(0,0,0,0.34), 0 0 14px rgba(24,242,213,0.18); }
+}
+
+/* Hide scrollbar but KEEP scroll ability */
+html, body {
+  scrollbar-width: none;     /* Firefox */
+  -ms-overflow-style: none;  /* IE/Edge */
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar {
+  display: none;             /* Chrome/Safari */
+}

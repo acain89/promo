@@ -533,66 +533,82 @@ export default function Reveal() {
       };
 
   return (
-    <PanelShell
-      label=""
-      labelClass="reveal"
-      footer={
-        <div className="fineprint" style={{ opacity: 0.7, textAlign: "center", lineHeight: 1.25 }}>
-          For verification:{" "}
-          <a
-            href="https://www.texaslottery.com/export/sites/lottery/Games/Daily_4/index.html"
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{ color: "inherit", textDecoration: "underline" }}
-          >
-            Texas Daily 4
-          </a>
-        </div>
-      }
+  <PanelShell
+    label=""
+    labelClass="reveal"
+    footer={
+      <div className="fineprint" style={{ opacity: 0.7, textAlign: "center", lineHeight: 1.25 }}>
+        For verification:{" "}
+        <a
+          href="https://www.texaslottery.com/export/sites/lottery/Games/Daily_4/index.html"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: "inherit", textDecoration: "underline" }}
+        >
+          Texas Daily 4
+        </a>
+      </div>
+    }
+  >
+    <div
+      className="revealScrollHide"
+      style={{
+        display: "grid",
+        gap: 12,
+        minHeight: "100%",
+        paddingBottom: 18,
+        overflowY: "auto",
+        WebkitOverflowScrolling: "touch",
+        scrollbarWidth: "none",
+        msOverflowStyle: "none",
+      }}
     >
-      <div style={{ display: "grid", gap: 12 }}>
-        {/* Top: Back + Logout + centered title */}
-        <div style={{ position: "relative", paddingTop: 6 }}>
-          <button
-            type="button"
-            style={{ ...topBtnStyle, position: "absolute", top: 0, left: 0 }}
-            onClick={() => nav(-1)}
-            disabled={busy}
-            aria-label="Back"
-          >
-            Back
-          </button>
+      <style>{`
+        .revealScrollHide::-webkit-scrollbar { display: none; }
+      `}</style>
 
-          <button
-            type="button"
-            style={{ ...topBtnStyle, position: "absolute", top: 0, right: 0 }}
-            onClick={doLogout}
-            disabled={busy}
-            aria-label="Log out"
-          >
-            Log Out
-          </button>
+      {/* Top: Back + Logout + centered title */}
+      <div style={{ position: "relative", paddingTop: 6 }}>
+        <button
+          type="button"
+          style={{ ...topBtnStyle, position: "absolute", top: 0, left: 0 }}
+          onClick={() => nav(-1)}
+          disabled={busy}
+          aria-label="Back"
+        >
+          Back
+        </button>
 
-          <div
-            style={{
-              fontSize: 34,
-              fontWeight: 900,
-              letterSpacing: "0.06em",
-              color: "var(--accent)",
-              marginTop: 10,
-              textAlign: "center",
-              textShadow: "0 10px 30px rgba(0,0,0,0.45)",
-            }}
-          >
-            drawnfray
-          </div>
+        <button
+          type="button"
+          style={{ ...topBtnStyle, position: "absolute", top: 0, right: 0 }}
+          onClick={doLogout}
+          disabled={busy}
+          aria-label="Log out"
+        >
+          Log Out
+        </button>
 
-          <div style={{ fontSize: 13, letterSpacing: "0.14em", marginTop: -6, textAlign: "center" }}>
-            <span style={{ color: "#9ad7ff" }}>Select.</span>{" "}
-            <span style={{ color: "#c6a7ff" }}>Submit.</span>{" "}
-            <span style={{ color: "#7affc2" }}>Reveal.</span>
-          </div>
+        <div
+          style={{
+            fontSize: 34,
+            fontWeight: 900,
+            letterSpacing: "0.06em",
+            color: "var(--accent)",
+            marginTop: 10,
+            textAlign: "center",
+            textShadow: "0 10px 30px rgba(0,0,0,0.45)",
+          }}
+        >
+          drawnfray
         </div>
+
+        <div style={{ fontSize: 13, letterSpacing: "0.14em", marginTop: -6, textAlign: "center" }}>
+          <span style={{ color: "#9ad7ff" }}>Select.</span>{" "}
+          <span style={{ color: "#c6a7ff" }}>Submit.</span>{" "}
+          <span style={{ color: "#7affc2" }}>Reveal.</span>
+        </div>
+      </div>
 
         {/* ✅ Premium single-line reference (NO ids / NO cycles / NO countdown) */}
         {headerLine ? (
