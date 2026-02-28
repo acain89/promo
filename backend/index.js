@@ -21,6 +21,7 @@ import adminUsers from "./routes/adminUsers.js";
 
 import profileBootstrapRoutes from "./routes/profileBootstrap.js";
 import guessAvailabilityRoutes from "./routes/guessAvailability.js";
+import quickPickRoutes from "./routes/quickPick.js";
 
 const app = express();
 
@@ -197,6 +198,9 @@ app.use(requireUser, checkoutRoutes);
 app.use(requireUser, checkoutConfirmRoutes);
 app.use(requireUser, profileBootstrapRoutes);
 app.use(requireUser, guessAvailabilityRoutes);
+
+// ✅ Quick Pick MUST be protected too
+app.use(requireUser, quickPickRoutes);
 
 /* =========================================================
    FALLBACKS

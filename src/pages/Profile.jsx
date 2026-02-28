@@ -285,6 +285,11 @@ export default function Profile() {
   const [availLoading, setAvailLoading] = useState(false);
   const [available, setAvailable] = useState(null); // null | true | false
 
+  // Quick Pick UI state (backend is authoritative)
+  const MAX_QUICK_PICKS = 10;
+  const [qpRemaining, setQpRemaining] = useState(null); // null until first quick pick response
+  const [qpMsg, setQpMsg] = useState(""); // small helper text (optional)
+
   const parsedCheckout = useMemo(() => {
     try {
       const p = new URLSearchParams(window.location.search);
@@ -440,41 +445,13 @@ export default function Profile() {
 
     const t = setTimeout(async () => {
       try {
-        // ✅ Include required params (guess + digits) and optional contestId
-        // ✅ Backend route that actually exists (your screenshot shows 404 on /guess-available)
-const qs = new URLSearchParams();
+        const digitsOnly = onlyDigits(guessRaw).slice(0, DIGITS);
+        if (digitsOnly.length !== DIGITS) return;
 
-// Send multiple common keys so we match backend expectations without breaking anything
-qs.set("guess", g);
-qs.set("num", g);
-qs.set("value", g);
-
-qs.set("digits", String(DIGITS));
-
-// Contest identifiers: send both id-style and cutoff-style
-const contestId =
-  contest?.id ?? contest?.contestId ?? contest?._id ?? contest?.contest ?? null;
-if (contestId) {
-  qs.set("contestId", String(contestId));
-  qs.set("contest", String(contestId));
-}
-
-// Cutoff timestamps (very commonly used server-side to locate the current contest)
-if (cutoffAt) {
-  qs.set("cutoffAt", String(cutoffAt));
-  qs.set("cutoffAtMs", String(cutoffAt));
-  qs.set("endsOnMs", String(cutoffAt));
-}
-
-const digitsOnly = onlyDigits(guessRaw).slice(0, DIGITS);
-if (digitsOnly.length !== DIGITS) return;
-
-// ✅ Call WITHOUT cache-bust (__ts) and without extra params
-const r = await apiGet(
-  `/api/guess-availability?guess=${encodeURIComponent(digitsOnly)}`,
-  { cacheBust: false }
-);
-
+        const r = await apiGet(
+          `/api/guess-availability?guess=${encodeURIComponent(digitsOnly)}`,
+          { cacheBust: false }
+        );
 
         if (reqId !== availReqIdRef.current) return;
 
@@ -555,6 +532,42 @@ const r = await apiGet(
         <span style={{ fontWeight: 950 }}>✕ Not Available</span>
       </div>
     );
+  }
+
+  async function handleQuickPick() {
+    if (loading || busy || locked || !cutoffAt) return;
+
+    try {
+      setErr("");
+      setStatus("");
+      setQpMsg("");
+      setBusy(true);
+
+      const r = await apiPost("/api/quick-pick", {});
+      if (!r || r.ok === false) throw new Error(r?.error || "Quick Pick failed.");
+
+      const picked = String(r.guess || "").trim();
+      if (onlyDigits(picked).length !== DIGITS) throw new Error("Quick Pick failed.");
+
+      // Put it into the SAME field the user uses for manual entry.
+      // This automatically triggers your existing availability check effect.
+      setGuessRaw(picked);
+
+      // Optional UI: remaining quick picks (backend authoritative if provided)
+      if (typeof r.remaining === "number" && Number.isFinite(r.remaining)) {
+        setQpRemaining(Math.max(0, Math.min(MAX_QUICK_PICKS, Math.floor(r.remaining))));
+        setQpMsg(`Quick Pick selected. ${Math.max(0, Math.min(MAX_QUICK_PICKS, Math.floor(r.remaining)))} left this game.`);
+      } else {
+        setQpMsg("Quick Pick selected.");
+      }
+    } catch (e) {
+      const msg = String(e?.message || "Quick Pick failed.");
+
+      // If backend uses 429 with a friendly message, it will come through here.
+      setErr(msg);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function beginCheckout(useExistingGuess = false) {
@@ -788,11 +801,45 @@ const r = await apiGet(
                       value={onlyDigits(guessRaw).slice(0, DIGITS)}
                       onChange={(v) => {
                         if (duplicatePaid || queuedPaid) setErr("");
+                        setQpMsg("");
                         setGuessRaw(v);
                       }}
                       disabled={busy || !cutoffAt}
                       digits={DIGITS}
                     />
+
+                    {/* ✅ Quick Pick button (fills the SAME field used for manual entry) */}
+                    <div className="form" style={{ marginTop: 10 }}>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={handleQuickPick}
+                        disabled={busy || !cutoffAt}
+                        style={{
+                          width: "100%",
+                          minHeight: 46,
+                          borderRadius: 14,
+                          fontWeight: 950,
+                          letterSpacing: "0.12em",
+                          textTransform: "uppercase",
+                        }}
+                        aria-label="Quick Pick"
+                      >
+                        Quick Pick
+                      </button>
+
+                      <div className="miniMuted" style={{ marginTop: 8, textAlign: "center" }}>
+                        {typeof qpRemaining === "number"
+                          ? `Quick Picks left: ${qpRemaining} / ${MAX_QUICK_PICKS}`
+                          : `Quick Picks: up to ${MAX_QUICK_PICKS} per game.`}
+                        {qpMsg ? (
+                          <>
+                            <br />
+                            <span style={{ opacity: 0.95 }}>{qpMsg}</span>
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
 
                     {/* ✅ Availability indicator */}
                     {availabilityBadge()}
