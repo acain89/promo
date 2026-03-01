@@ -369,12 +369,10 @@ export async function ensureContestForCutoff(cutoffAtMs) {
 
 const CURRENT_REF = () => db().collection("contest").doc("current");
 
-// A contest is "still active" if:
-// - not resolved
-// This mirrors your current design (you do not expire based on cutoff/endMs).
+// Contest stays active until admin manually starts next one.
+// Resolving does NOT auto-advance.
 function isContestStillActive(contest, atMs) {
   if (!contest) return false;
-  if (contest.resolved) return false;
   return true;
 }
 

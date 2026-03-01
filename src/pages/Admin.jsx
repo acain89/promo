@@ -166,9 +166,9 @@ function WinnerModal({ open, onClose, data }) {
         background: "rgba(0,0,0,0.74)",
         backdropFilter: "blur(6px)",
       }}
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose?.();
-      }}
+      onClick={(e) => {
+  if (e.target === e.currentTarget) onClose?.();
+}}
       role="dialog"
       aria-modal="true"
       aria-label="Winner"
@@ -184,7 +184,7 @@ function WinnerModal({ open, onClose, data }) {
           position: "relative",
           overflow: "hidden",
         }}
-        onMouseDown={(e) => e.stopPropagation()}
+  onClick={(e) => e.stopPropagation()}
       >
         <div
           aria-hidden="true"

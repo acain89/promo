@@ -43,47 +43,23 @@ function normalizeDrawLabel(raw) {
   if (s.includes("day")) return "Day";
   if (s.includes("eve")) return "Evening";
   if (s.includes("night")) return "Night";
-  if (s.includes("mid")) return "Night";
   return raw ? String(raw) : "—";
 }
 
 function truthyExact(w) {
-  const v =
-    w?.exact ??
-    w?.isExact ??
-    w?.exactMatch ??
-    w?.matchedExact ??
-    w?.matchExact ??
-    null;
-
+  const v = w?.exact ?? w?.isExact ?? null;
   if (typeof v === "boolean") return v;
-
-  const s = String(v ?? "").trim().toLowerCase();
-  if (!s) return null;
-  if (["true", "yes", "y", "1", "exact"].includes(s)) return true;
-  if (["false", "no", "n", "0"].includes(s)) return false;
-  return null;
+  return String(v).toLowerCase() === "true";
 }
 
-// Prefer "advertised/landing prize" fields if backend sends them
 function pickAdvertisedPrizeCents(w) {
-  const candidates = [
+  const vals = [
     w?.advertisedPrizeCents,
-    w?.advertisedPrize,
-    w?.displayPrizeCents,
-    w?.displayPrize,
-    w?.landingPrizeCents,
-    w?.landingPrize,
-    w?.projectedPrizeCents,
-    w?.poolCents,
     w?.prizePoolCents,
     w?.prizeCents,
-    w?.prize,
     w?.amountCents,
-    w?.amount,
   ];
-
-  for (const c of candidates) {
+  for (const c of vals) {
     const n = Number(c);
     if (Number.isFinite(n) && n > 0) return Math.floor(n);
   }
@@ -98,92 +74,41 @@ export default function Winners() {
 
   useEffect(() => {
     let alive = true;
-
     (async () => {
       try {
-        setErr("");
         const r = await apiGet("/api/winners");
         if (!alive) return;
-
-        // Support either array or { items: [...] }
-        const list = Array.isArray(r) ? r : Array.isArray(r?.items) ? r.items : [];
-        setItems(list);
+        setItems(Array.isArray(r) ? r : r?.items || []);
       } catch {
         if (!alive) return;
-        setItems([]);
         setErr("Failed to load winners.");
       } finally {
-        if (!alive) return;
-        setLoading(false);
+        if (alive) setLoading(false);
       }
     })();
-
-    return () => {
-      alive = false;
-    };
+    return () => (alive = false);
   }, []);
 
-  // Newest first, cap 52
   const rows = useMemo(() => {
-    const list = Array.isArray(items) ? items : [];
+    return (Array.isArray(items) ? items : [])
+      .map((w, i) => ({
+        id: w?.id || `w-${i}`,
+        un: safe(w?.winnerUN || w?.winner || w?.username),
+        entry: pad4(w?.guess || w?.entry),
+        drawLabel: normalizeDrawLabel(w?.drawLabel || w?.draw),
+        target: pad4(w?.target || w?.targetNumber),
 
-    const normalized = list
-      .map((w, i) => {
-        const ts =
-          w?.timestamp ??
-          w?.winnerTimestamp ??
-          w?.resolvedAt ??
-          w?.endedAt ??
-          w?.createdAt ??
-          w?.entryTimestamp ??
-          w?.submittedAt ??
-          null;
+        // 🔥 DFT FIX (restored)
+        dft: w?.dft ?? w?.diff ?? w?.distance ?? w?.bestDft ?? "—",
 
-        const prizeCents = pickAdvertisedPrizeCents(w);
-
-        const un = safe(w?.winnerUN || w?.winner || w?.username || w?.un);
-        const entry = pad4(w?.guess || w?.entry || w?.submission || w?.pick);
-
-        const drawLabel = normalizeDrawLabel(
-          w?.drawLabel || w?.draw || w?.targetLabel || w?.targetName || w?.winningDraw
-        );
-
-        const target = pad4(w?.target || w?.targetNumber || w?.drawResult || w?.winningTarget);
-
-        const dftRaw = w?.dft ?? w?.diff ?? w?.distance ?? w?.bestDft ?? null;
-        const dft = dftRaw == null || dftRaw === "" ? "—" : String(dftRaw);
-
-        const exact = truthyExact(w);
-
-        const playedAt =
-          w?.playedAt ??
-          w?.drawPlayedAt ??
-          w?.targetPlayedAt ??
-          w?.winningDrawAt ??
-          w?.drawTimestamp ??
-          w?.resultTimestamp ??
-          null;
-
-        return {
-          id: w?.id || `w-${i}`,
-          un,
-          entry,
-          exact,
-          drawLabel,
-          playedAt,
-          target,
-          dft,
-          ts,
-          prizeCents,
-        };
-      })
+        exact: truthyExact(w),
+        playedAt: w?.playedAt ?? null,
+        ts: w?.timestamp ?? w?.resolvedAt ?? null,
+        prizeCents: pickAdvertisedPrizeCents(w),
+      }))
       .sort((a, b) => (Number(b.ts || 0) || 0) - (Number(a.ts || 0) || 0))
       .slice(0, 52);
-
-    return normalized;
   }, [items]);
-
-  const lastWinner = rows[0] || null;
 
   return (
     <PanelShell
@@ -199,263 +124,94 @@ export default function Winners() {
     >
       <div
         style={{
-          height: "calc(100dvh - 170px)",
+          height: "calc(100dvh - 190px)",
           display: "flex",
           flexDirection: "column",
-          gap: 12,
-          paddingBottom: 6,
+          minHeight: 0,
         }}
       >
-        <div
-          style={{
-            fontSize: 34,
-            fontWeight: 900,
-            letterSpacing: "0.06em",
-            color: "var(--accent)",
-            marginTop: 10,
-            textAlign: "center",
-          }}
-        >
-          drawnfray
-        </div>
-
-        <div style={{ fontSize: 13, letterSpacing: "0.14em", marginTop: -6, textAlign: "center" }}>
-          <span style={{ color: "#9ad7ff" }}>Select.</span>{" "}
-          <span style={{ color: "#c6a7ff" }}>Submit.</span>{" "}
-          <span style={{ color: "#7affc2" }}>Reveal.</span>
-        </div>
-
-        {lastWinner ? (
-          <div
-            style={{
-              borderRadius: 14,
-              border: "1px solid rgba(255,255,255,0.12)",
-              background: "rgba(255,255,255,0.03)",
-              padding: "14px 14px",
-            }}
-          >
-            <div
-              style={{
-                fontSize: 10,
-                letterSpacing: "0.18em",
-                textTransform: "uppercase",
-                opacity: 0.75,
-                marginBottom: 10,
-                textAlign: "center",
-              }}
-            >
-              Most Recent Winner
-            </div>
-
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
-              <div style={{ fontSize: 18, fontWeight: 950 }}>{lastWinner.un}</div>
-              <div style={{ textAlign: "right" }}>
-                <div style={{ fontSize: 16, fontWeight: 950 }}>{dollarsFromCents(lastWinner.prizeCents)}</div>
-              </div>
-            </div>
-
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-                gap: 10,
-                marginTop: 12,
-              }}
-            >
-              <div
-                style={{
-                  borderRadius: 12,
-                  border: "1px solid rgba(255,255,255,0.10)",
-                  background: "rgba(255,255,255,0.015)",
-                  padding: "10px 10px",
-                }}
-              >
-                <div className="label">Entry</div>
-                <div className="value" style={{ letterSpacing: "0.14em", fontVariantNumeric: "tabular-nums" }}>
-                  {lastWinner.entry}
-                </div>
-              </div>
-
-              <div
-                style={{
-                  borderRadius: 12,
-                  border: "1px solid rgba(255,255,255,0.10)",
-                  background: "rgba(255,255,255,0.015)",
-                  padding: "10px 10px",
-                }}
-              >
-                <div className="label">Exact</div>
-                <div className="value">{lastWinner.exact == null ? "—" : lastWinner.exact ? "Yes" : "No"}</div>
-              </div>
-
-              <div
-                style={{
-                  borderRadius: 12,
-                  border: "1px solid rgba(255,255,255,0.10)",
-                  background: "rgba(255,255,255,0.015)",
-                  padding: "10px 10px",
-                }}
-              >
-                <div className="label">DFT</div>
-                <div className="value">{lastWinner.dft}</div>
-              </div>
-
-              <div
-                style={{
-                  borderRadius: 12,
-                  border: "1px solid rgba(255,255,255,0.10)",
-                  background: "rgba(255,255,255,0.015)",
-                  padding: "10px 10px",
-                }}
-              >
-                <div className="label">Target</div>
-                <div className="value" style={{ fontVariantNumeric: "tabular-nums" }}>
-                  {lastWinner.drawLabel} · {lastWinner.target}
-                </div>
-                <div className="miniMuted" style={{ marginTop: 4, opacity: 0.8 }}>
-                  Played: {formatDateTime(lastWinner.playedAt)}
-                </div>
-              </div>
-
-              <div
-                style={{
-                  borderRadius: 12,
-                  border: "1px solid rgba(255,255,255,0.10)",
-                  background: "rgba(255,255,255,0.015)",
-                  padding: "10px 10px",
-                  gridColumn: "1 / -1",
-                }}
-              >
-                <div className="label">Timestamp</div>
-                <div className="value">{formatDateTime(lastWinner.ts)}</div>
-              </div>
-            </div>
+        <div style={{ textAlign: "center", marginBottom: 8 }}>
+          <div style={{ fontSize: 34, fontWeight: 900, color: "var(--accent)" }}>
+            drawnfray
           </div>
-        ) : null}
+          <div style={{ fontSize: 12, letterSpacing: "0.12em" }}>
+            <span style={{ color: "#9ad7ff" }}>Select.</span>{" "}
+            <span style={{ color: "#c6a7ff" }}>Submit.</span>{" "}
+            <span style={{ color: "#7affc2" }}>Reveal.</span>
+          </div>
+        </div>
 
+        {/* SCROLL AREA */}
         <div
-          className="scrollList"
           style={{
             flex: 1,
-            overflowY: "auto",
-            WebkitOverflowScrolling: "touch",
+            minHeight: 0,
+
+            // 🔥 ALWAYS SHOW SCROLLBAR
+            overflowY: "scroll",
+
             paddingRight: 4,
           }}
         >
-          {loading ? (
-            <div className="miniMuted" style={{ textAlign: "center", padding: "10px 0" }}>
-              Loading…
-            </div>
-          ) : null}
+          {loading && <div className="miniMuted">Loading…</div>}
+          {!loading && err && <div className="error">{err}</div>}
+          {!loading && !rows.length && <div className="miniMuted">No winners posted yet.</div>}
 
-          {!loading && err ? (
-            <div className="error" style={{ textAlign: "center" }}>
-              {err}
-            </div>
-          ) : null}
-
-          {!loading && !rows.length ? (
-            <div className="miniMuted" style={{ textAlign: "center", padding: "10px 0" }}>
-              No winners posted yet.
-            </div>
-          ) : null}
-
-          {rows.map((r, idx) => (
+          {rows.map((r) => (
             <div
               key={r.id}
-              className="winnerCard"
               style={{
                 borderRadius: 14,
-                border: "1px solid rgba(255,255,255,0.10)",
-                background: "rgba(255,255,255,0.02)",
-                padding: "14px 14px",
-                marginTop: idx === 0 ? 0 : 10,
+                border: "2px solid rgba(110,160,255,0.65)",
+                background:
+                  "linear-gradient(180deg, rgba(70,110,255,.18), rgba(255,255,255,.02))",
+                boxShadow:
+                  "0 0 0 1px rgba(120,170,255,.35), 0 0 16px rgba(80,120,255,.30)",
+                padding: "10px 12px",
+                marginBottom: 10,
               }}
             >
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
-                <div style={{ display: "grid", gap: 2 }}>
-                  <div className="winnerUN" style={{ fontSize: 16, fontWeight: 950 }}>
-                    {r.un}
-                  </div>
-                  <div className="miniMuted" style={{ opacity: 0.75 }}>
-                    {formatDateTime(r.ts)}
-                  </div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                <div>
+                  <div style={{ fontSize: 17, fontWeight: 900 }}>{r.un}</div>
+                  <div style={{ fontSize: 11, opacity: 0.7 }}>{formatDateTime(r.ts)}</div>
                 </div>
-
-                <div style={{ textAlign: "right" }}>
-                  <div className="winnerPrize" style={{ fontSize: 15, fontWeight: 950 }}>
-                    {dollarsFromCents(r.prizeCents)}
-                  </div>
+                <div style={{ fontSize: 16, fontWeight: 900 }}>
+                  {dollarsFromCents(r.prizeCents)}
                 </div>
               </div>
 
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-                  gap: 10,
-                  marginTop: 12,
-                }}
-              >
-                <div
-                  style={{
-                    borderRadius: 12,
-                    border: "1px solid rgba(255,255,255,0.10)",
-                    background: "rgba(255,255,255,0.012)",
-                    padding: "10px 10px",
-                  }}
-                >
-                  <div className="label">Entry</div>
-                  <div className="value" style={{ letterSpacing: "0.14em", fontVariantNumeric: "tabular-nums" }}>
-                    {r.entry}
-                  </div>
-                </div>
-
-                <div
-                  style={{
-                    borderRadius: 12,
-                    border: "1px solid rgba(255,255,255,0.10)",
-                    background: "rgba(255,255,255,0.012)",
-                    padding: "10px 10px",
-                  }}
-                >
-                  <div className="label">Exact</div>
-                  <div className="value">{r.exact == null ? "—" : r.exact ? "Yes" : "No"}</div>
-                </div>
-
-                <div
-                  style={{
-                    borderRadius: 12,
-                    border: "1px solid rgba(255,255,255,0.10)",
-                    background: "rgba(255,255,255,0.012)",
-                    padding: "10px 10px",
-                  }}
-                >
-                  <div className="label">DFT</div>
-                  <div className="value">{r.dft}</div>
-                </div>
-
-                <div
-                  style={{
-                    borderRadius: 12,
-                    border: "1px solid rgba(255,255,255,0.10)",
-                    background: "rgba(255,255,255,0.012)",
-                    padding: "10px 10px",
-                  }}
-                >
-                  <div className="label">Target</div>
-                  <div className="value" style={{ fontVariantNumeric: "tabular-nums" }}>
-                    {r.drawLabel} · {r.target}
-                  </div>
-                  <div className="miniMuted" style={{ marginTop: 4, opacity: 0.8 }}>
-                    Played: {formatDateTime(r.playedAt)}
-                  </div>
-                </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <InfoCell label="Entry" value={r.entry} />
+                <InfoCell label="Exact" value={r.exact ? "Yes" : "No"} />
+                <InfoCell label="DFT" value={r.dft} />
+                <InfoCell
+                  label="Target"
+                  value={`${r.drawLabel} · ${r.target}`}
+                  sub={`Played: ${formatDateTime(r.playedAt)}`}
+                />
               </div>
             </div>
           ))}
         </div>
       </div>
     </PanelShell>
+  );
+}
+
+function InfoCell({ label, value, sub }) {
+  return (
+    <div
+      style={{
+        borderRadius: 10,
+        border: "1px solid rgba(255,255,255,.12)",
+        padding: "8px 10px",
+        background: "rgba(255,255,255,.02)",
+      }}
+    >
+      <div style={{ fontSize: 10, letterSpacing: ".14em", opacity: 0.6 }}>{label}</div>
+      <div style={{ fontSize: 18, fontWeight: 800 }}>{value}</div>
+      {sub ? <div style={{ fontSize: 11, opacity: 0.7 }}>{sub}</div> : null}
+    </div>
   );
 }
