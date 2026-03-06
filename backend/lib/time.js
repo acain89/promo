@@ -369,11 +369,19 @@ export async function ensureContestForCutoff(cutoffAtMs) {
 
 const CURRENT_REF = () => db().collection("contest").doc("current");
 
-// Contest stays active until admin manually starts next one.
-// Resolving does NOT auto-advance.
+// Contest is active only until its real scheduled cutoff passes.
+// Resolving does NOT auto-advance, but an expired contest should not
+// continue to drive the public landing timer.
 function isContestStillActive(contest, atMs) {
   if (!contest) return false;
-  return true;
+
+  const now = Number(atMs || 0);
+  const cutoffAt = Number(contest.cutoffAt || 0);
+
+  if (!Number.isFinite(now) || now <= 0) return false;
+  if (!Number.isFinite(cutoffAt) || cutoffAt <= 0) return false;
+
+  return now < cutoffAt;
 }
 
 export async function ensureActiveContestNow() {
