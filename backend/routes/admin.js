@@ -22,7 +22,6 @@ import { onlyDigits, normalizeNumber, absDiff, nowMs } from "../lib/utils.js";
 import {
   ensureActiveContestNow,
   ensureContestForCutoff, // ✅ create contest deterministically by cutoff
-  mostRecentChicagoCutoffAtOrBefore,
   contestIdFromCutoffMs,
   getOrInitAmoeState,
   setManualRegistrationWindow,
@@ -1102,18 +1101,14 @@ r.post(
   rateLimit({ routeKey: "admin_schedule_commit", limit: 1000, windowMs: 15 * 60 * 1000 }),
   async (req, res) => {
     try {
-      const { startMs } = req.body || {};
+      const { startMs, endMs } = req.body || {};
 
-      const s = parseMs(startMs);
-      if (!s) throw new Error("Invalid startMs.");
+const s = parseMs(startMs);
+const e = parseMs(endMs);
 
-      // ✅ FORCE RULE (canonical via existing cutoff logic):
-      // Registration ALWAYS ends at the next Saturday 9:00 AM Chicago cutoff after startMs.
-      const lastCutoffAtOrBeforeStart = mostRecentChicagoCutoffAtOrBefore(s);
-      const e = Number(lastCutoffAtOrBeforeStart || 0) + 7 * 24 * 60 * 60 * 1000;
-
-      if (!e) throw new Error("Invalid computed endMs.");
-      if (e <= s) throw new Error("end must be after start.");
+if (!s) throw new Error("Invalid startMs.");
+if (!e) throw new Error("Invalid endMs.");
+if (e <= s) throw new Error("end must be after start.");
 
       // ---------- CURRENT CONTEST ----------
       const active = await ensureActiveContestNow();
