@@ -22,6 +22,7 @@ import { onlyDigits, normalizeNumber, absDiff, nowMs } from "../lib/utils.js";
 import {
   ensureActiveContestNow,
   ensureContestForCutoff, // ✅ create contest deterministically by cutoff
+  mostRecentChicagoCutoffAtOrBefore,
   contestIdFromCutoffMs,
   getOrInitAmoeState,
   setManualRegistrationWindow,
