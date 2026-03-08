@@ -387,56 +387,35 @@ function isContestStillActive(contest, atMs) {
 export async function ensureActiveContestNow() {
   const now = nowMs();
 
-  // 0) If contest/current exists and points to a STILL-ACTIVE contest, use it.
   try {
     const curSnap = await CURRENT_REF().get();
-    if (curSnap.exists) {
-      const cur = curSnap.data() || {};
-      const curId = String(cur.contestId || "").trim();
+    if (!curSnap.exists) return null;
 
-      if (curId) {
-        const cSnap = await db().collection("contests").doc(curId).get();
+    const cur = curSnap.data() || {};
+    const curId = String(cur.contestId || "").trim();
+    if (!curId) return null;
 
-        if (cSnap.exists) {
-          const contest = { id: cSnap.id, ...(cSnap.data() || {}) };
+    const cSnap = await db().collection("contests").doc(curId).get();
+    if (!cSnap.exists) return null;
 
-          // ✅ do not trust contest/current if it’s resolved
-          if (isContestStillActive(contest, now)) {
-            if (!contest.activatedAt) {
-              await db().collection("contests").doc(contest.id).set({ activatedAt: now }, { merge: true });
-              return { ...contest, activatedAt: now };
-            }
-            return contest;
-          }
-        }
-      }
+    const contest = { id: cSnap.id, ...(cSnap.data() || {}) };
+
+    if (!isContestStillActive(contest, now)) {
+      return null;
     }
+
+    if (!contest.activatedAt) {
+      await db().collection("contests").doc(contest.id).set(
+        { activatedAt: now },
+        { merge: true }
+      );
+      return { ...contest, activatedAt: now };
+    }
+
+    return contest;
   } catch {
-    // ignore and fallback
+    return null;
   }
-
-  // 1) Default rule: active contest is the one for the NEXT cutoff after now.
-  const nextCutoff = nextChicagoCutoffAfter(now);
-  const active = await ensureContestForCutoff(nextCutoff);
-
-  // Persist pointer for consistency across servers/clients.
-  await CURRENT_REF().set(
-    {
-      contestId: active.id,
-      cutoffAt: active.cutoffAt,
-      endsOn: active.endsOn,
-      mode: active.mode || "DAILY4",
-      updatedAt: now,
-    },
-    { merge: true }
-  );
-
-  if (!active.activatedAt) {
-    await db().collection("contests").doc(active.id).set({ activatedAt: now }, { merge: true });
-    return { ...active, activatedAt: now };
-  }
-
-  return active;
 }
 
 export async function getContestForEntryTime(entryMs) {

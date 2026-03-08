@@ -9,8 +9,7 @@ function pad2(n) {
 }
 
 function formatDDHHMMSS(ms) {
-  if (ms == null) return "--:--:--:--";
-  if (ms <= 0) return "00:00:00:00";
+  if (ms == null || ms <= 0) return "00:00:00:00";
   const total = Math.floor(ms / 1000);
   const days = Math.floor(total / 86400);
   const rem1 = total - days * 86400;
@@ -58,9 +57,15 @@ export default function Landing() {
         setLoading(true);
       }
 
-      // ✅ Cache-bust so landing reflects admin schedule changes immediately
-      const c = await apiGet(`/api/contest?__ts=${Date.now()}`);
-      if (c?.serverNow) setServerDelta(c.serverNow - Date.now());
+      // apiGet already cache-busts GET requests
+      const c = await apiGet("/api/contest");
+
+      if (c?.serverNow != null) {
+        const sn = Number(c.serverNow);
+        if (Number.isFinite(sn)) {
+          setServerDelta(sn - Date.now());
+        }
+      }
 
       if (c?.ok) setContest(c);
       else setContest(null);
@@ -109,24 +114,29 @@ export default function Landing() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ✅ Timer source-of-truth:
-// Countdown should always target the *effective* registration end (manual window wins).
-const endAtMs = useMemo(() => {
-  const v =
-    contest?.effectiveEndMs ??
-    contest?.endsOnMs ?? // back-compat from backend
-    contest?.endMs ??
-    contest?.activeContest?.endMs ??
-    contest?.activeContest?.end ??
-    contest?.end ??
-    null;
+  // Source-of-truth for countdown:
+  // 1) manual/effective override if backend explicitly sets it
+  // 2) authoritative contest cutoffAt
+  // 3) legacy/back-compat fallbacks
+  const endAtMs = useMemo(() => {
+    const v =
+      contest?.effectiveEndMs ??
+      contest?.cutoffAt ??
+      contest?.activeContest?.cutoffAt ??
+      contest?.paid?.cutoffAt ??
+      contest?.endsOnMs ??
+      contest?.endMs ??
+      contest?.activeContest?.endMs ??
+      contest?.activeContest?.end ??
+      contest?.end ??
+      null;
 
-  if (v == null) return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}, [contest]);
+    if (v == null) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }, [contest]);
 
-const remaining = endAtMs ? endAtMs - now : null;
+  const remaining = endAtMs != null ? Math.max(0, endAtMs - now) : null;
 
   // Admin can override later; safe fallback now.
   const prizeHeadline =
@@ -137,15 +147,14 @@ const remaining = endAtMs ? endAtMs - now : null;
 
   // Optional backend flags (if/when you add them). Fallback keeps UX usable now.
   const playStatus = String(contest?.playStatus || "").toUpperCase(); // OPEN | CLOSED | QUEUED | etc.
-  const playOpen = typeof contest?.playOpen === "boolean" ? contest.playOpen : true;
-
+  const playOpen = typeof contest?.playOpen === "boolean" ? contest.playOpen : !!contest?.ok;
   // Treat "closed" as: backend explicitly closed, OR playOpen false.
   const isClosed = !playOpen || playStatus === "CLOSED";
 
-  // ✅ IMPORTANT: button should NEVER be dead just because entry is closed.
+  // IMPORTANT: button should NEVER be dead just because entry is closed.
   // When closed: CTA becomes "View Results" and routes to /reveal.
   const ctaLabel = isClosed ? "View Results" : "Enter";
-  const ctaDisabled = loading; // only disable while loading (not based on timer)
+  const ctaDisabled = loading;
 
   function onEnter() {
     if (loading) return;
@@ -202,7 +211,7 @@ const remaining = endAtMs ? endAtMs - now : null;
     return Math.round(n * 100); // assume dollars
   }
 
-  // ✅ Pull lifetime paid-out cents from /api/contest
+  // Pull lifetime paid-out cents from /api/contest
   const totalPaidOutCents = toCentsMaybe(contest?.totalPaidOutCents) ?? 0;
 
   const statBoxStyle = {
